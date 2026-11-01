@@ -169,3 +169,27 @@ fn subject_length_limit_is_2048_bytes() {
         &issuer.svid(&over, AUDIENCE, exp_in(300)),
     ));
 }
+
+fn claims() -> serde_json::Value {
+    json!({"sub": SUB, "aud": [AUDIENCE], "exp": exp_in(300)})
+}
+
+#[test]
+fn typ_header_is_restricted() {
+    let issuer = SvidIssuer::new();
+    for typ in ["JWT", "JOSE"] {
+        let token = issuer.sign(&json!({"alg": "ES256", "typ": typ}), &claims());
+        assert!(validate(&issuer, &token).is_ok(), "{typ}");
+    }
+    for typ in [json!("jwt"), json!("at+jwt"), json!(""), json!(1)] {
+        let token = issuer.sign(&json!({"alg": "ES256", "typ": typ}), &claims());
+        assert_rejected(validate(&issuer, &token));
+    }
+}
+
+#[test]
+fn critical_header_extensions_are_rejected() {
+    let issuer = SvidIssuer::new();
+    let token = issuer.sign(&json!({"alg": "ES256", "crit": ["exp"]}), &claims());
+    assert_rejected(validate(&issuer, &token));
+}

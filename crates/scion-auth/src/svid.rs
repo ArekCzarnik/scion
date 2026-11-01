@@ -124,6 +124,9 @@ impl SvidBundle {
 struct Header {
     alg: String,
     kid: Option<String>,
+    typ: Option<String>,
+    /// RFC 7515: a verifier must reject extensions it does not understand; Scion knows none.
+    crit: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +217,16 @@ impl SvidValidator {
         let header: Header = decode_json(header_part, "malformed header")?;
         if !ALGORITHMS.contains(&header.alg.as_str()) {
             return Err(rejected("algorithm not allowed"));
+        }
+        if header
+            .typ
+            .as_deref()
+            .is_some_and(|t| t != "JWT" && t != "JOSE")
+        {
+            return Err(rejected("typ not allowed"));
+        }
+        if header.crit.is_some() {
+            return Err(rejected("critical header extension"));
         }
         let sig = URL_SAFE_NO_PAD
             .decode(sig_part)
