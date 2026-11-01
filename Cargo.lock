@@ -4050,6 +4050,7 @@ dependencies = [
  "pasetors",
  "rand 0.9.5",
  "reqwest",
+ "ring",
  "scion-auth",
  "scion-core",
  "scion-testkit",
@@ -4571,6 +4572,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "blake3",
  "bytes",
  "futures",
@@ -4582,6 +4584,7 @@ dependencies = [
  "rand 0.9.5",
  "rand_chacha",
  "rcgen",
+ "ring",
  "rustls",
  "scion-core",
  "scion-object",
