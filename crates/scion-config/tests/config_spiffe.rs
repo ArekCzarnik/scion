@@ -1,5 +1,6 @@
 //! `[auth.spiffe]` (docs/features/spiffe-workload-identity.md): optional, strict, and with its
 //! own token lifetime.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test-only helpers outside #[test] fns
 
 use scion_config::{ConfigError, MapEnv, ServerConfig, parse_server};
 use std::path::PathBuf;
@@ -46,13 +47,11 @@ fn invalid_key(extra: &str) -> String {
 }
 
 #[test]
-#[allow(clippy::unwrap_used)]
 fn the_section_is_optional() {
     assert!(parse("").unwrap().auth.spiffe.is_none());
 }
 
 #[test]
-#[allow(clippy::unwrap_used)]
 fn defaults_are_short_lived() {
     let cfg = parse(SECTION).unwrap();
     let s = cfg.auth.spiffe.unwrap();
@@ -68,7 +67,6 @@ fn defaults_are_short_lived() {
 }
 
 #[test]
-#[allow(clippy::unwrap_used)]
 fn a_file_can_replace_the_url() {
     let section = SECTION.replace(
         "bundle_url = \"https://spire.example.org/keys\"",
