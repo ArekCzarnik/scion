@@ -277,3 +277,20 @@ fn oversized_tokens_are_rejected_before_parsing() {
     let token = issuer.sign(&json!({"alg": "ES256"}), &padded);
     assert_rejected(validate(&issuer, &token));
 }
+
+proptest::proptest! {
+    #[test]
+    fn arbitrary_input_never_panics_or_validates(input in ".{0,512}") {
+        let issuer = SvidIssuer::new();
+        proptest::prop_assert!(validate(&issuer, &input).is_err());
+    }
+
+    #[test]
+    fn arbitrary_dotted_parts_never_validate(
+        a in "[A-Za-z0-9_-]{0,64}", b in "[A-Za-z0-9_-]{0,64}", c in "[A-Za-z0-9_-]{0,64}",
+    ) {
+        let issuer = SvidIssuer::new();
+        let token = format!("{a}.{b}.{c}");
+        proptest::prop_assert!(validate(&issuer, &token).is_err());
+    }
+}
