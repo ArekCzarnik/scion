@@ -103,6 +103,11 @@ pub struct SvidBundle {
 }
 
 impl SvidBundle {
+    /// Whether the bundle holds no usable key.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
     /// Parse a SPIFFE bundle (a JWK set).
     pub fn parse(json: &[u8]) -> Result<Self> {
         let raw: RawBundle =

@@ -5,12 +5,14 @@
 
 pub mod device_flow;
 
+mod bundle;
 mod github;
 mod secret;
 mod service;
 mod svid;
 mod token;
 
+pub use bundle::{BundleCache, BundleSource};
 pub use github::{GitHubClient, GitHubUser};
 #[cfg(feature = "test-hooks")]
 pub use secret::ct_eq_calls;

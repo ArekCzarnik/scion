@@ -4047,6 +4047,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "humantime",
+ "parking_lot",
  "pasetors",
  "proptest",
  "rand 0.9.5",
