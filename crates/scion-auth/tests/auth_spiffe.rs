@@ -132,3 +132,40 @@ fn audience_must_be_exactly_ours() {
     );
     assert_rejected(validate(&issuer, &no_aud));
 }
+
+#[test]
+fn subject_must_be_a_spiffe_id_in_our_trust_domain() {
+    let issuer = SvidIssuer::new();
+    for sub in [
+        "spiffe://other.org/ns/agents/sa/reviewer",
+        "spiffe://example.org.evil.com/ns/agents",
+        "spiffe://example.org",
+        "spiffe://example.org/a?b=c",
+        "spiffe://example.org/a#b",
+        "spiffe://example.org//a",
+        "spiffe://example.org/../a",
+        "service:agent",
+        "github:alice",
+        "",
+    ] {
+        assert_rejected(validate(&issuer, &issuer.svid(sub, AUDIENCE, exp_in(300))));
+    }
+    let no_sub = issuer.sign(
+        &json!({"alg": "ES256"}),
+        &json!({"aud": [AUDIENCE], "exp": exp_in(300)}),
+    );
+    assert_rejected(validate(&issuer, &no_sub));
+}
+
+#[test]
+fn subject_length_limit_is_2048_bytes() {
+    let issuer = SvidIssuer::new();
+    let prefix = "spiffe://example.org/";
+    let at_limit = format!("{prefix}{}", "a".repeat(2048 - prefix.len()));
+    assert!(validate(&issuer, &issuer.svid(&at_limit, AUDIENCE, exp_in(300))).is_ok());
+    let over = format!("{at_limit}a");
+    assert_rejected(validate(
+        &issuer,
+        &issuer.svid(&over, AUDIENCE, exp_in(300)),
+    ));
+}
