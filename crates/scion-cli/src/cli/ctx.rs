@@ -6,6 +6,7 @@ use super::error::{CliResult, local};
 use crate::output::envelope;
 use scion_config::{ClientConfig, Env, WcConfig, parse_client, parse_wc, resolve_endpoint};
 use scion_core::{ErrorCode, Result as ScionResult};
+use scion_proto::workload::{IDENTITY_WAIT, fetch_jwt_svid};
 use scion_proto::{Endpoint, ScionClient, TlsOptions, error_from_status, v1};
 use scion_wc::credentials::{self, Credentials};
 use serde::Serialize;
@@ -334,6 +335,31 @@ impl<'a> Ctx<'a> {
         self.client = None;
         Ok(())
     }
+}
+
+/// `Login{jwt_svid}` with an SVID fetched for the audience the server advertises (SPEC 12.3a).
+pub(crate) async fn spiffe_login(
+    client: &ScionClient,
+    socket: &str,
+) -> CliResult<v1::LoginResponse> {
+    let info = client
+        .objects()
+        .get_server_info(v1::GetServerInfoRequest {})
+        .await
+        .map_err(|s| error_from_status(&s))?
+        .into_inner();
+    if info.spiffe_audience.is_empty() {
+        return Err(local("the server does not accept JWT-SVID login"));
+    }
+    let svid = fetch_jwt_svid(socket, &info.spiffe_audience, IDENTITY_WAIT).await?;
+    let response = client
+        .auth()
+        .login(v1::LoginRequest {
+            credential: Some(v1::login_request::Credential::JwtSvid(svid)),
+        })
+        .await
+        .map_err(|s| error_from_status(&s))?;
+    Ok(response.into_inner())
 }
 
 /// `Login{github_access_token}` (SPEC 12.2 step 2).

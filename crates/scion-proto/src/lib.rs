@@ -9,6 +9,22 @@
 #![warn(missing_docs)]
 
 /// Generated `scion.v1` protobuf types and tonic services (SPEC 7).
+/// The SPIFFE Workload API (`proto/spiffe/workload.proto`), which has no package.
+#[allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    rustdoc::invalid_html_tags,
+    rustdoc::bare_urls,
+    rustdoc::broken_intra_doc_links
+)]
+pub mod spiffe {
+    tonic::include_proto!("_");
+}
+
 #[allow(
     missing_docs,
     clippy::all,
@@ -33,6 +49,7 @@ mod endpoint;
 pub mod raw;
 mod status;
 mod trailers;
+pub mod workload;
 
 pub use client::{
     BearerInterceptor, CaptureBody, CaptureFuture, EpochCapture, ScionClient, Transport,
