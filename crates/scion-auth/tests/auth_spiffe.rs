@@ -25,7 +25,6 @@ fn validate(issuer: &SvidIssuer, token: &str) -> Result<Principal> {
     SvidValidator::new("example.org", AUDIENCE).validate(token, &bundle, now())
 }
 
-#[allow(dead_code)]
 fn assert_rejected(result: Result<Principal>) {
     let err = result.expect_err("the token must be rejected");
     assert_eq!(err.code, ErrorCode::Unauthenticated);
@@ -58,4 +57,36 @@ fn every_supported_algorithm_is_accepted() {
             "{alg}"
         );
     }
+}
+
+#[test]
+fn unlisted_algorithms_are_rejected() {
+    let issuer = SvidIssuer::new();
+    let claims = json!({"sub": SUB, "aud": [AUDIENCE], "exp": exp_in(300)});
+    for alg in [
+        "none", "None", "HS256", "HS384", "HS512", "ES512", "EdDSA", "",
+    ] {
+        let token = issuer.raw(&json!({"alg": alg}), &claims, b"forged");
+        assert_rejected(validate(&issuer, &token));
+    }
+    let token = issuer.raw(&json!({"alg": "none"}), &claims, b"");
+    assert_rejected(validate(&issuer, &token));
+}
+
+#[test]
+fn a_key_only_verifies_its_own_algorithm_family() {
+    let issuer = SvidIssuer::new();
+    let claims = json!({"sub": SUB, "aud": [AUDIENCE], "exp": exp_in(300)});
+    let es256 = issuer.sign(&json!({"alg": "ES256"}), &claims);
+    let sig = es256.rsplit('.').next().unwrap();
+    let swapped = format!(
+        "{}.{}",
+        issuer
+            .sign(&json!({"alg": "RS256"}), &claims)
+            .rsplit_once('.')
+            .unwrap()
+            .0,
+        sig
+    );
+    assert_rejected(validate(&issuer, &swapped));
 }

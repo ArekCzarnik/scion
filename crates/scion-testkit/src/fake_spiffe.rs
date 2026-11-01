@@ -86,6 +86,16 @@ impl SvidIssuer {
         )
     }
 
+    /// A token with exactly these parts, so that tests can forge any signature.
+    pub fn raw(&self, header: &Value, payload: &Value, sig: &[u8]) -> String {
+        format!(
+            "{}.{}.{}",
+            b64(&serde_json::to_vec(header).unwrap()),
+            b64(&serde_json::to_vec(payload).unwrap()),
+            b64(sig)
+        )
+    }
+
     /// `header` and `payload` signed with the key matching `header.alg`.
     pub fn sign(&self, header: &Value, payload: &Value) -> String {
         let input = format!(
