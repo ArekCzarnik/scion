@@ -1,0 +1,7 @@
+.git
+.idea
+target
+benchmarks
+corpus
+testdata
+docker/.env
