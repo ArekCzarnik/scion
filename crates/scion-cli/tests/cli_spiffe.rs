@@ -247,7 +247,7 @@ async fn an_explicit_token_is_never_replaced() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_github_login_keeps_its_stored_token_without_a_workload_api() {
+async fn without_a_workload_api_nothing_is_exchanged() {
     let s = Spiffe::start(false).await;
     store_token(&s, expired_token(&s));
     let out = scion(&s.h.env_anon(), &["whoami"]).await;
@@ -266,4 +266,34 @@ async fn login_works_through_the_daemon() {
     let out = scion(&env, &["--json", "whoami"]).await;
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(out.json()["data"]["principal"], SUB);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_daemon_keeps_agents_apart() {
+    let s = Spiffe::start(true).await;
+    s.h.land_change(&TestCluster::seeder(), &[("notes.txt", b"shared\n")], 1)
+        .await;
+    let mut env = s.env();
+    env.0.insert("SCION_ENDPOINT".into(), s.h.daemon_endpoint());
+
+    let out = scion(&env, &["cat", "main:notes.txt"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.text(), "shared\n");
+
+    let exp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 300;
+    let stranger = "spiffe://example.org/ns/agents/sa/stranger";
+    s.workload.set_svid(s.issuer.svid(stranger, AUDIENCE, exp));
+    std::fs::remove_file(creds_path(&s.h)).unwrap();
+    let out = scion(&env, &["--json", "login", "--spiffe"]).await;
+    assert_eq!(out.json()["data"]["principal"], stranger);
+    let out = scion(&env, &["cat", "main:notes.txt"]).await;
+    assert_ne!(
+        out.code, 0,
+        "the warmed cache must not serve an unlisted agent"
+    );
+    assert!(!out.text().contains("shared"));
 }
