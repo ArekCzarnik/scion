@@ -211,3 +211,119 @@ async fn an_empty_svid_is_a_missing_field() {
     let status = login(&start(&fake).await, "").await.unwrap_err();
     expect_err(&status, ErrorCode::InvalidArgument, None);
 }
+
+/// Store a blob and record it as uploaded by the client's own principal (SPEC 12.5).
+async fn upload(srv: &InProcessServer, c: &ScionClient, content: &[u8]) -> (ObjectId, u64) {
+    let (id, _) = srv
+        .ctx()
+        .objects
+        .put_blob(content.to_vec().into())
+        .await
+        .unwrap();
+    let who = c
+        .auth()
+        .who_am_i(v1::WhoAmIRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .principal;
+    let meta = &srv.ctx().storage.meta;
+    meta.record_upload(&id, &who, SystemTime::now())
+        .await
+        .unwrap();
+    (id, content.len() as u64)
+}
+
+async fn put(
+    srv: &InProcessServer,
+    c: &ScionClient,
+    path: &str,
+    change: u32,
+) -> Result<ObjectId, tonic::Status> {
+    let parent = root(srv).await;
+    let (id, size) = upload(srv, c, path.as_bytes()).await;
+    let delta = vec![put_entry(path, &id, size)];
+    let created = c
+        .write()
+        .create_changeset(create_req(&[parent], delta, change))
+        .await?;
+    Ok(ObjectId::from_bytes(&created.into_inner().changeset_id).unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_agent_is_limited_to_its_own_acl_rights() {
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    let srv = start(&fake).await;
+    let reviewer = agent(&srv, &issuer, REVIEWER).await;
+    let runner = agent(&srv, &issuer, RUNNER).await;
+    put(&srv, &reviewer, "reviews/a.txt", 1).await.unwrap();
+    put(&srv, &runner, "builds/a.txt", 2).await.unwrap();
+    let denied = put(&srv, &reviewer, "builds/b.txt", 3).await.unwrap_err();
+    expect_err(&denied, ErrorCode::PermissionDenied, None);
+    let denied = put(&srv, &runner, "reviews/b.txt", 4).await.unwrap_err();
+    expect_err(&denied, ErrorCode::PermissionDenied, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unlisted_workload_has_no_access() {
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    let srv = start(&fake).await;
+    let stranger = agent(&srv, &issuer, "spiffe://example.org/ns/agents/sa/stranger").await;
+    let denied = put(&srv, &stranger, "reviews/a.txt", 1).await.unwrap_err();
+    expect_err(&denied, ErrorCode::PermissionDenied, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replicas_share_rights_and_attribution() {
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    let srv = start(&fake).await;
+    let one = agent(&srv, &issuer, REVIEWER).await;
+    let two = agent(&srv, &issuer, REVIEWER).await;
+    for (client, path, change) in [(&one, "reviews/1.txt", 1), (&two, "reviews/2.txt", 2)] {
+        let id = put(&srv, client, path, change).await.unwrap();
+        let cs = srv.ctx().history.changeset(&id).await.unwrap();
+        assert_eq!(cs.created_by, REVIEWER);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_names_the_agent() {
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    let srv = start(&fake).await;
+    let reviewer = agent(&srv, &issuer, REVIEWER).await;
+    let id = put(&srv, &reviewer, "reviews/a.txt", 1).await.unwrap();
+    let meta_id = srv
+        .ctx()
+        .history
+        .changeset(&id)
+        .await
+        .unwrap()
+        .changeset
+        .meta;
+    let meta = srv.ctx().objects.get_meta(&meta_id).await.unwrap();
+    assert_eq!(meta.creator, REVIEWER.as_bytes());
+
+    let land = v1::LandRequest {
+        r#ref: "main".into(),
+        head: id.as_bytes().to_vec(),
+        allow_empty: false,
+    };
+    reviewer.write().land(land).await.unwrap();
+    let log = v1::GetRefLogRequest {
+        name: "main".into(),
+        from_version: 0,
+        limit: 0,
+    };
+    let entries = reviewer
+        .refs()
+        .get_ref_log(log)
+        .await
+        .unwrap()
+        .into_inner()
+        .entries;
+    assert_eq!(entries.last().unwrap().principal, REVIEWER);
+}
