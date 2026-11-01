@@ -389,3 +389,59 @@ async fn a_bundle_outage_keeps_the_server_working() {
     assert_eq!(http_get(srv.admin_addr().unwrap(), "/readyz").await.0, 200);
     assert!(clock.now() > UNIX_EPOCH);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[should_panic(expected = "SPIFFE bundle")]
+async fn an_unreachable_bundle_fails_startup() {
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    fake.set_down(true);
+    start(&fake).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_svid_is_rejected_with_the_uniform_error() {
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    let srv = start(&fake).await;
+    let status = login(&srv, &issuer.svid(REVIEWER, AUDIENCE, 1))
+        .await
+        .unwrap_err();
+    let err = expect_err(&status, ErrorCode::Unauthenticated, None);
+    assert_eq!(err.message, "invalid JWT-SVID");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn svids_never_reach_the_logs() {
+    let capture = scion_obs::capture::LogCapture::install();
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    let srv = start(&fake).await;
+    let good = svid(&issuer, REVIEWER);
+    let bad = format!("{}x", svid(&issuer, RUNNER));
+    let token = login(&srv, &good).await.unwrap().token;
+    login(&srv, &bad).await.unwrap_err();
+    let needles = [good.as_bytes(), bad.as_bytes(), token.as_bytes()];
+    assert!(capture.find_needles(&needles).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_failed_logins_are_rate_limited() {
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    let srv = InProcessServer::start(opts_with(section(&fake), |c| {
+        c.rate_limit.per_principal_rps = 1;
+        c.rate_limit.burst = 3;
+    }))
+    .await;
+    let client = srv.client(None).await;
+    let mut limited = false;
+    for _ in 0..20 {
+        let request = v1::LoginRequest {
+            credential: Some(v1::login_request::Credential::JwtSvid("forged".into())),
+        };
+        let status = client.auth().login(request).await.unwrap_err();
+        limited |= status.code() == tonic::Code::ResourceExhausted;
+    }
+    assert!(limited);
+}
