@@ -128,3 +128,56 @@ async fn a_missing_identity_fails_after_the_limit() {
     assert!(err.message.contains("no identity issued"), "{err:?}");
     assert!(workload.calls() >= 2);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_workload_api_is_a_clear_error() {
+    let s = Spiffe::start(false).await;
+    let out = scion(&s.h.env_anon(), &["login", "--spiffe"]).await;
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr.contains("SPIFFE_ENDPOINT_SOCKET"),
+        "{}",
+        out.stderr
+    );
+
+    let mut env = s.h.env_anon();
+    env.0.insert(
+        "SPIFFE_ENDPOINT_SOCKET".into(),
+        "unix:///nonexistent/api.sock".into(),
+    );
+    let out = scion(&env, &["login", "--spiffe"]).await;
+    assert_ne!(out.code, 0);
+    assert!(out.stderr.contains("Workload API"), "{}", out.stderr);
+
+    env.0
+        .insert("SPIFFE_ENDPOINT_SOCKET".into(), "tcp://127.0.0.1:1".into());
+    let out = scion(&env, &["login", "--spiffe"]).await;
+    assert_ne!(out.code, 0);
+    assert!(out.stderr.contains("unix:"), "{}", out.stderr);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_without_spiffe_is_a_clear_error() {
+    let h = Harness::start(false).await;
+    let issuer = SvidIssuer::new();
+    let workload = FakeWorkloadApi::start(svid(&issuer)).await;
+    let mut env = h.env_anon();
+    env.0
+        .insert("SPIFFE_ENDPOINT_SOCKET".into(), workload.socket());
+    let out = scion(&env, &["login", "--spiffe"]).await;
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr.contains("does not accept JWT-SVID"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(workload.calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_and_spiffe_exclude_each_other() {
+    let s = Spiffe::start(false).await;
+    let out = scion(&s.env(), &["login", "--spiffe", "--service", "ci"]).await;
+    assert_ne!(out.code, 0);
+    assert_eq!(s.workload.calls(), 0);
+}
