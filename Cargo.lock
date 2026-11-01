@@ -4298,6 +4298,7 @@ dependencies = [
  "futures",
  "gix",
  "scion-auth",
+ "scion-config",
  "scion-core",
  "scion-import",
  "scion-object",

@@ -6,8 +6,9 @@
 //!              [--batch-bytes <n>]
 //! ```
 //!
-//! Authentication: `SCION_TOKEN`, or a service login with `SCION_SERVICE_NAME` and
-//! `SCION_SERVICE_SECRET`. The endpoint may also come from `SCION_ENDPOINT` and the CA from
+//! Authentication: `SCION_TOKEN`, a service login with `SCION_SERVICE_NAME` and
+//! `SCION_SERVICE_SECRET`, or a JWT-SVID from the Workload API at `SPIFFE_ENDPOINT_SOCKET`.
+//! The endpoint may also come from `SCION_ENDPOINT` and the CA from
 //! `SCION_CA_FILE`. On success the [`scion_import::ImportReport`] is printed as JSON on
 //! stdout; on failure the error goes to stderr and the exit status is 1.
 
@@ -15,6 +16,8 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use scion_import::{ImportOptions, import};
 use scion_object::RefName;
+use scion_proto::v1::login_request::Credential;
+use scion_proto::workload::{ENV_SOCKET, IDENTITY_WAIT, fetch_jwt_svid};
 use scion_proto::{Endpoint, ScionClient, TlsOptions, error_from_status, v1};
 use std::path::PathBuf;
 
@@ -54,6 +57,21 @@ fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
+/// A JWT-SVID from the Workload API for the audience the server advertises.
+async fn fetch_svid(anon: &ScionClient, socket: &str) -> anyhow::Result<String> {
+    let info = anon
+        .objects()
+        .get_server_info(v1::GetServerInfoRequest {})
+        .await
+        .map_err(|s| error_from_status(&s))
+        .context("reading the server info")?
+        .into_inner();
+    if info.spiffe_audience.is_empty() {
+        bail!("the server does not accept JWT-SVID login");
+    }
+    Ok(fetch_jwt_svid(socket, &info.spiffe_audience, IDENTITY_WAIT).await?)
+}
+
 async fn connect(args: &Args) -> anyhow::Result<ScionClient> {
     let ep = Endpoint::parse(&args.endpoint)?;
     let tls = match &args.ca_file {
@@ -66,22 +84,24 @@ async fn connect(args: &Args) -> anyhow::Result<ScionClient> {
     if let Some(token) = env_nonempty("SCION_TOKEN") {
         return Ok(ScionClient::connect(&ep, tls, Some(token)).await?);
     }
-    let (Some(name), Some(secret)) = (
-        env_nonempty("SCION_SERVICE_NAME"),
-        env_nonempty("SCION_SERVICE_SECRET"),
-    ) else {
-        bail!("set SCION_TOKEN, or SCION_SERVICE_NAME and SCION_SERVICE_SECRET");
-    };
+    let service = env_nonempty("SCION_SERVICE_NAME").zip(env_nonempty("SCION_SERVICE_SECRET"));
+    let socket = env_nonempty(ENV_SOCKET);
+    if service.is_none() && socket.is_none() {
+        bail!("set SCION_TOKEN, SCION_SERVICE_NAME and SCION_SERVICE_SECRET, or {ENV_SOCKET}");
+    }
     let anon = ScionClient::connect(&ep, tls, None).await?;
+    let credential = match (service, socket) {
+        (Some((name, secret)), _) => Credential::Service(v1::ServiceCredential {
+            service_name: name,
+            service_secret: secret,
+        }),
+        (None, Some(socket)) => Credential::JwtSvid(fetch_svid(&anon, &socket).await?),
+        (None, None) => bail!("no credential"),
+    };
     let resp = anon
         .auth()
         .login(v1::LoginRequest {
-            credential: Some(v1::login_request::Credential::Service(
-                v1::ServiceCredential {
-                    service_name: name,
-                    service_secret: secret,
-                },
-            )),
+            credential: Some(credential),
         })
         .await
         .map_err(|s| error_from_status(&s))
