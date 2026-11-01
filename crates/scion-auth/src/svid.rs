@@ -191,8 +191,8 @@ fn decode_json<T: serde::de::DeserializeOwned>(part: &str, reason: &'static str)
 
 /// Validates JWT-SVIDs for one trust domain and audience.
 pub struct SvidValidator {
-    #[allow(dead_code)]
-    trust_domain: String,
+    /// `spiffe://<trust domain>/`, the prefix of every accepted SPIFFE ID.
+    id_prefix: String,
     audience: String,
 }
 
@@ -200,7 +200,7 @@ impl SvidValidator {
     /// A validator accepting `audience` from `trust_domain`.
     pub fn new(trust_domain: &str, audience: &str) -> Self {
         SvidValidator {
-            trust_domain: trust_domain.to_owned(),
+            id_prefix: format!("spiffe://{trust_domain}/"),
             audience: audience.to_owned(),
         }
     }
@@ -237,6 +237,9 @@ impl SvidValidator {
         if !payload.aud.is_only(&self.audience) {
             return Err(rejected("wrong audience"));
         }
-        Principal::parse(&payload.sub).map_err(|_| rejected("subject is not a SPIFFE ID"))
+        match Principal::parse(&payload.sub) {
+            Ok(p @ Principal::Spiffe(_)) if payload.sub.starts_with(&self.id_prefix) => Ok(p),
+            _ => Err(rejected("subject outside the trust domain")),
+        }
     }
 }
