@@ -254,3 +254,16 @@ async fn a_github_login_keeps_its_stored_token_without_a_workload_api() {
     assert_ne!(out.code, 0);
     assert_eq!(s.workload.calls(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn login_works_through_the_daemon() {
+    let s = Spiffe::start(true).await;
+    let mut env = s.env();
+    env.0.insert("SCION_ENDPOINT".into(), s.h.daemon_endpoint());
+    let out = login(&env).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["data"]["principal"], SUB);
+    let out = scion(&env, &["--json", "whoami"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["data"]["principal"], SUB);
+}
