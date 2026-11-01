@@ -181,3 +181,76 @@ async fn service_and_spiffe_exclude_each_other() {
     assert_ne!(out.code, 0);
     assert_eq!(s.workload.calls(), 0);
 }
+
+fn expired_token(s: &Spiffe) -> String {
+    let who = scion_core::Principal::Spiffe(SUB.into());
+    let now = SystemTime::now();
+    let ctx = s.h.cluster.servers[0].ctx();
+    ctx.keyring
+        .issue(
+            &who,
+            Duration::from_secs(60),
+            now - Duration::from_secs(3600),
+        )
+        .unwrap()
+        .0
+}
+
+fn store_token(s: &Spiffe, token: String) {
+    let creds = scion_wc::credentials::Credentials {
+        token,
+        github_token: None,
+    };
+    scion_wc::credentials::write(&creds_path(&s.h), &creds).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_token_is_replaced_silently() {
+    let s = Spiffe::start(false).await;
+    let expired = expired_token(&s);
+    store_token(&s, expired.clone());
+    let out = scion(&s.env(), &["--json", "whoami"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["data"]["principal"], SUB);
+    assert_eq!(s.workload.calls(), 1);
+    let fresh = scion_wc::credentials::read(&creds_path(&s.h)).unwrap();
+    assert_ne!(fresh.token, expired);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_prior_login_is_needed() {
+    let s = Spiffe::start(false).await;
+    let out = scion(&s.env(), &["--json", "whoami"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["data"]["principal"], SUB);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_exchange_is_reported_once() {
+    let s = Spiffe::start(false).await;
+    store_token(&s, expired_token(&s));
+    s.workload.set_svid(svid(&SvidIssuer::new()));
+    let out = scion(&s.env(), &["whoami"]).await;
+    assert_ne!(out.code, 0);
+    assert!(out.stderr.contains("UNAUTHENTICATED"), "{}", out.stderr);
+    assert_eq!(s.workload.calls(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicit_token_is_never_replaced() {
+    let s = Spiffe::start(false).await;
+    let mut env = s.env();
+    env.0.insert("SCION_TOKEN".into(), expired_token(&s));
+    let out = scion(&env, &["whoami"]).await;
+    assert_ne!(out.code, 0);
+    assert_eq!(s.workload.calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_github_login_keeps_its_stored_token_without_a_workload_api() {
+    let s = Spiffe::start(false).await;
+    store_token(&s, expired_token(&s));
+    let out = scion(&s.h.env_anon(), &["whoami"]).await;
+    assert_ne!(out.code, 0);
+    assert_eq!(s.workload.calls(), 0);
+}
