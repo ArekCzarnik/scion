@@ -193,3 +193,58 @@ fn critical_header_extensions_are_rejected() {
     let token = issuer.sign(&json!({"alg": "ES256", "crit": ["exp"]}), &claims());
     assert_rejected(validate(&issuer, &token));
 }
+
+#[test]
+fn tampered_tokens_are_rejected() {
+    let issuer = SvidIssuer::new();
+    let token = issuer.svid(SUB, AUDIENCE, exp_in(300));
+    let parts: Vec<&str> = token.split('.').collect();
+    let other = issuer.svid(
+        "spiffe://example.org/ns/agents/sa/admin",
+        AUDIENCE,
+        exp_in(300),
+    );
+    let other_parts: Vec<&str> = other.split('.').collect();
+    let swapped_payload = format!("{}.{}.{}", parts[0], other_parts[1], parts[2]);
+    assert_rejected(validate(&issuer, &swapped_payload));
+    let swapped_header = issuer.sign(&json!({"alg": "ES256", "typ": "JWT"}), &claims());
+    let swapped_header = swapped_header.split('.').next().unwrap();
+    assert_rejected(validate(
+        &issuer,
+        &format!("{swapped_header}.{}.{}", parts[1], parts[2]),
+    ));
+    let mut sig = parts[2].to_owned();
+    let last = if sig.ends_with('A') { "B" } else { "A" };
+    sig.replace_range(sig.len() - 1.., last);
+    assert_rejected(validate(
+        &issuer,
+        &format!("{}.{}.{sig}", parts[0], parts[1]),
+    ));
+    assert_rejected(validate(&issuer, &format!("{}.{}.", parts[0], parts[1])));
+}
+
+#[test]
+fn only_jwt_svid_keys_of_the_bundle_are_trusted() {
+    let issuer = SvidIssuer::new();
+    let stranger = SvidIssuer::new();
+    let token = stranger.svid(SUB, AUDIENCE, exp_in(300));
+    assert_rejected(validate(&issuer, &token));
+
+    let token = issuer.svid(SUB, AUDIENCE, exp_in(300));
+    let x509 = String::from_utf8(issuer.bundle_json())
+        .unwrap()
+        .replace("jwt-svid", "x509-svid");
+    let bundle = SvidBundle::parse(x509.as_bytes()).unwrap();
+    assert_rejected(SvidValidator::new("example.org", AUDIENCE).validate(&token, &bundle, now()));
+}
+
+#[test]
+fn kid_selects_the_key_and_is_optional() {
+    let issuer = SvidIssuer::new();
+    let no_kid = issuer.sign(&json!({"alg": "ES384"}), &claims());
+    assert!(validate(&issuer, &no_kid).is_ok());
+    let unknown = issuer.sign(&json!({"alg": "ES256", "kid": "missing"}), &claims());
+    assert_rejected(validate(&issuer, &unknown));
+    let wrong = issuer.sign(&json!({"alg": "ES256", "kid": "fake-rsa"}), &claims());
+    assert_rejected(validate(&issuer, &wrong));
+}
