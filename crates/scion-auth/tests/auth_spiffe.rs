@@ -90,3 +90,22 @@ fn a_key_only_verifies_its_own_algorithm_family() {
     );
     assert_rejected(validate(&issuer, &swapped));
 }
+
+#[test]
+fn expiry_is_enforced_with_30_seconds_of_leeway() {
+    let issuer = SvidIssuer::new();
+    let at = |secs| issuer.svid(SUB, AUDIENCE, exp_in(secs));
+    assert!(validate(&issuer, &at(-29)).is_ok());
+    assert_rejected(validate(&issuer, &at(-30)));
+    assert_rejected(validate(&issuer, &at(-3600)));
+    let no_exp = issuer.sign(
+        &json!({"alg": "ES256"}),
+        &json!({"sub": SUB, "aud": [AUDIENCE]}),
+    );
+    assert_rejected(validate(&issuer, &no_exp));
+    let bad_exp = issuer.sign(
+        &json!({"alg": "ES256"}),
+        &json!({"sub": SUB, "aud": [AUDIENCE], "exp": "tomorrow"}),
+    );
+    assert_rejected(validate(&issuer, &bad_exp));
+}
