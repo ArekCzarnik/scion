@@ -54,6 +54,12 @@ Default runs use `scion_core::test_support::proptest_cases(N)` (about 10^4 where
 | `SCION_TEST_S3_ACCESS_KEY`, `SCION_TEST_S3_SECRET_KEY` | MinIO defaults `minioadmin` / `minioadmin` in `scripts/test-external.sh` |
 | `SCION_TEST_S3_REGION` | Default `us-east-1` |
 
+| `SCION_TEST_SPIRE_SOCKET` | Gate for the SPIRE suite: the Workload API socket. `scripts/test-spire.sh` sets this and the three below |
+| `SCION_TEST_SPIRE_BUNDLE` | Path of the SPIFFE bundle file |
+| `SCION_TEST_SPIRE_ID` | The test process's SPIFFE ID |
+| `SCION_TEST_SPIRE_TRUST_DOMAIN` | The trust domain |
+| `SCION_TEST_SPIRE_ROTATE` | Script that rotates the JWT key and rewrites the bundle file |
+
 Gated tests are named `external_*`; without their variables they print `SKIP: ...` and pass.
 `scion_conformance::Backend::from_env()` adds the External backend to the conformance suites when
 both gates are set.

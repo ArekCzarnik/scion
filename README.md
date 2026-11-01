@@ -243,8 +243,8 @@ scion CLI ── Unix socket ──▶ scion-daemon ── TLS/gRPC ──▶ sc
   a versioned compare-and-swap. Concurrent attempts retry with backoff.
 - **Derived indexes.** Eager and lazy derived data support path history, blame, commit-graph
   queries, and Git mappings.
-- **Access control and redaction.** GitHub device-flow login, service principals, path/ref
-  policies, and quarantine/purge of blob or metadata contents without rewriting identifiers.
+- **Access control and redaction.** GitHub device-flow login, service principals, SPIFFE
+  workload identity, path/ref policies, and quarantine/purge of blob or metadata contents without rewriting identifiers.
 - **Git migration.** A one-way importer preserves history and records Git-to-Scion mappings.
 
 ## Scope
@@ -304,7 +304,9 @@ export SCION_ENDPOINT=https://scion.example.internal:7443
 ./target/debug/scion -C /tmp/scion-work land --ref main
 ```
 
-Use `login --service NAME` with `SCION_SERVICE_SECRET` for a configured service principal.
+Use `login --service NAME` with `SCION_SERVICE_SECRET` for a configured service principal, or
+[`login --spiffe`](docs/features/spiffe-workload-identity.md) with `SPIFFE_ENDPOINT_SOCKET` for a
+workload with a SPIFFE identity.
 To use a node daemon, start `scion-daemon --config /path/to/scion-daemon.toml` and point
 `SCION_ENDPOINT` at its `unix:///path/to/daemon.sock` endpoint.
 

@@ -430,6 +430,13 @@ signing_keys = ["/etc/scion/keys/2026-10.ed25519"]   # first key signs; all keys
 name = "ci"
 secret_sha256 = "$SCION_CI_SECRET_SHA256"
 
+[auth.spiffe]                                        # optional; absent disables JWT-SVID login
+trust_domain = "example.org"
+audience = "scion://monorepo"                        # unique to this deployment
+token_ttl = "1h"
+bundle_url = "https://spire-bundle.example.internal/keys"  # or bundle_file; exactly one
+bundle_refresh = "5m"
+
 [policy]
 path = "/etc/scion/acl.toml"
 reload = true
@@ -505,7 +512,8 @@ Semantics:
 - A `/` rule is REQUIRED.
 - For a path, the rule with the longest matching prefix governs, independently for `read` and
   `write`. Rules do not inherit or merge.
-- Principals may be given as `github:<login>` (case-insensitive) or `github-id:<number>`.
+- Principals may be given as `github:<login>` (case-insensitive), `github-id:<number>`,
+  `service:<name>`, or a full `spiffe://` ID (compared byte for byte).
 - Groups may nest; cycles are validation errors.
 - Ref patterns support a single trailing `*` segment. Exact names win over patterns; longest
   pattern wins among patterns.
@@ -543,6 +551,8 @@ upstream_max_concurrency = 256
 - Credentials: `~/.config/scion/credentials`, mode `0600`, holding the Scion token and OPTIONALLY
   the GitHub OAuth token for silent re-exchange.
 - Environment overrides: `SCION_ENDPOINT`, `SCION_TOKEN`.
+- `SPIFFE_ENDPOINT_SOCKET`: the Workload API, used by `scion login --spiffe` and for silent login
+  (Section 12.3a).
 - Working copy state: `<root>/.scion/` (Section 11.1).
 
 ### 6.5 Defaults Cheat Sheet
@@ -644,7 +654,7 @@ Errors use a gRPC status plus a `scion.v1.ErrorDetail { code, retryable, message
 
 ### 7.7 Auth and Admin RPCs (server)
 
-- `Login({github_access_token} | {service_name, service_secret}) -> {token, principal, expires_at}`
+- `Login({github_access_token} | {service_name, service_secret} | {jwt_svid}) -> {token, principal, expires_at}`
 - `WhoAmI() -> {principal, groups, expires_at}`
 - `CheckAccess(subject_token, object_ids) -> list<bool>` (daemon use; Section 10.4)
 - `Redact(object_ids, reason, purge_after?) -> {epoch, effective_by}`
@@ -1000,6 +1010,30 @@ The client MAY store the GitHub token (credentials file, `0600`) to re-exchange 
   against `auth.service_principals`.
 - Secrets are supplied via environment or secret files and MUST NOT appear in logs.
 
+### 12.3a Workload Identity (SPIFFE)
+
+Enabled by `[auth.spiffe]`. Scion validates the JWT-SVID, then issues an ordinary Scion token; the
+authorization path is unchanged.
+
+1. The client reads `spiffe_audience` from `GetServerInfo` and fetches a JWT-SVID for it through the
+   Workload API at `SPIFFE_ENDPOINT_SOCKET`. While the API answers `PermissionDenied`, the client
+   retries for up to 60 seconds.
+2. The client calls `Login{jwt_svid}`.
+3. The server checks, in order: compact serialization; `alg` is one of ES256, ES384, RS256, RS384,
+   RS512, PS256, PS384 or PS512, before any key is used; `typ`, if present, is `JWT` or `JOSE`; no
+   `crit` header; the signature, against a `use: jwt-svid` key of the cached bundle; `exp`, with
+   30 seconds of leeway; `aud` holds exactly the configured audience; `sub` is a SPIFFE ID in the
+   configured trust domain.
+4. Any failure is `UNAUTHENTICATED` with one fixed message. The reason is logged; the SVID is not.
+5. The principal is the SPIFFE ID and the token lives for `auth.spiffe.token_ttl`.
+
+The bundle is loaded at startup, and failure to load it is a startup error. It is reloaded every
+`auth.spiffe.bundle_refresh`. A failed reload keeps the last good keys and logs an error, and
+`Login` reads only the cache. `/readyz` does not depend on the bundle.
+
+A client whose token is rejected with `UNAUTHENTICATED` and that has `SPIFFE_ENDPOINT_SOCKET` set
+logs in again once. `SCION_TOKEN` is never replaced.
+
 ### 12.4 Path and Ref Authorization
 
 - Path read/write: the longest-prefix rule (Section 6.2).
@@ -1165,6 +1199,7 @@ equal the git tree's (excluding skipped gitlinks and empty git trees, which are 
 - `scion_derive_duration_seconds{type,mode}`, `scion_derive_backlog{type}`.
 - `scion_redaction_epoch{tier}`, `scion_redaction_lag_seconds{tier}`, `scion_policy_epoch_info`.
 - `scion_object_bytes_served_total{tier,encoding}`, `scion_upstream_requests_total{tier}`.
+- `scion_spiffe_bundle_age_seconds`: time since the SPIFFE bundle was last fetched successfully.
 
 ### 15.3 Health
 
@@ -1591,6 +1626,9 @@ Unless noted, Sections 19.1-19.18 are `Core Conformance`.
   id in the token; invalid token -> `UNAUTHENTICATED`.
 - Service login: correct secret succeeds; wrong secret fails; the comparison is constant-time
   (code review checklist item plus a test that both paths use the constant-time primitive).
+- JWT-SVID login: every rule of Section 12.3a has a rejecting case; the fixed error reveals none;
+  no SVID reaches the logs; expired tokens are replaced once through the Workload API; a real
+  SPIRE passes the gated `external_spiffe_*` suite.
 - Expired, malformed, wrong-key, and tampered tokens are rejected by server and daemon.
 - Key rotation: tokens signed by an old key still verify while it is listed; removal invalidates
   them.
