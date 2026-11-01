@@ -1,0 +1,81 @@
+# A single-node Scion server (docs/docker-compose.md).
+#   docker compose -f docker/compose.yml up -d --build --wait
+#
+# Only scion-server publishes a port. CockroachDB runs in insecure mode because scion-server has
+# no TLS client for the metadata store, so neither backend may leave this network.
+name: scion
+
+services:
+  cockroach:
+    image: cockroachdb/cockroach:v24.3.5
+    command: start-single-node --insecure
+    restart: unless-stopped
+    volumes:
+      - cockroach-data:/cockroach/cockroach-data
+    healthcheck:
+      test: ["CMD", "cockroach", "sql", "--insecure", "--host=localhost:26257", "-e", "SELECT 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # See docker/compose.test.yml for why this is the Bitnami legacy image.
+  minio:
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${SCION_S3_ACCESS_KEY:-scion}
+      MINIO_ROOT_PASSWORD: ${SCION_S3_SECRET_KEY:-scion-local-only}
+      MINIO_DEFAULT_BUCKETS: scion
+      MINIO_API_PORT_NUMBER: "9000"
+      MINIO_CONSOLE_PORT_NUMBER: "9001"
+    volumes:
+      - minio-data:/bitnami/minio/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  scion-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: server
+    image: scion-server:local
+    restart: unless-stopped
+    depends_on:
+      cockroach:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      SCION_DB_URL: postgresql://root@cockroach:26257/defaultdb?sslmode=disable
+      SCION_GITHUB_CLIENT_ID: ${SCION_GITHUB_CLIENT_ID:-}
+      SCION_TLS_HOSTS: ${SCION_TLS_HOSTS:-localhost,127.0.0.1,scion-server}
+      AWS_ACCESS_KEY_ID: ${SCION_S3_ACCESS_KEY:-scion}
+      AWS_SECRET_ACCESS_KEY: ${SCION_S3_SECRET_KEY:-scion-local-only}
+    ports:
+      - "${SCION_BIND:-127.0.0.1}:${SCION_PORT:-7443}:7443"
+    volumes:
+      - ./config:/etc/scion:ro
+      - scion-secrets:/var/lib/scion/secrets
+      - scion-client:/var/lib/scion/client
+      - scion-admin:/var/lib/scion/admin
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9464/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+networks:
+  default:
+    name: scion
+
+volumes:
+  cockroach-data:
+  minio-data:
+  scion-secrets:
+  scion-client:
+    name: scion-client
+  scion-admin:
+    name: scion-admin

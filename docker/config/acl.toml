@@ -1,0 +1,23 @@
+# Access policy for docker/compose.yml (SPEC 6.2). Reloaded while the server runs.
+# Anything not granted here is denied.
+version = 1
+
+[groups]
+# Add people as "github:<login>" once SCION_GITHUB_CLIENT_ID is set.
+writers = ["service:agent", "group:admins"]
+admins = ["service:admin"]
+
+[[paths]]
+prefix = "/"
+read = ["group:writers"]
+write = ["group:writers"]
+
+# `force` lets the first import replace the empty root that a new repository starts with.
+[refs."main"]
+update = ["group:writers"]
+force = ["group:admins"]
+
+[admin]
+redact = ["group:admins"]
+purge = ["group:admins"]
+refs = ["group:admins"]
