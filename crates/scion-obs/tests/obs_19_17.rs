@@ -88,7 +88,7 @@ fn every_15_2_metric_name_is_rendered_after_one_observation() {
             "{name} missing from:\n{text}"
         );
     }
-    assert_eq!(Metrics::NAMES.len(), 14);
+    assert_eq!(Metrics::NAMES.len(), 15);
 }
 
 #[test]
