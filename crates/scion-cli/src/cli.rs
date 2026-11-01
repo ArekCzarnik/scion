@@ -106,7 +106,7 @@ async fn execute(cli: &Cli, env: &dyn scion_config::Env, io: &mut dyn CliIo) -> 
                 && !matches!(cli.cmd, Cmd::Login(_))
                 && ctx.can_reexchange() =>
         {
-            tracing::info!("token rejected; re-exchanging the stored GitHub token");
+            tracing::info!("token rejected; logging in again");
             let root = ctx.find_root();
             ctx.reexchange(root.as_deref()).await?;
             dispatch(&cli.cmd, &mut ctx, io).await
