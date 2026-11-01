@@ -1,6 +1,7 @@
 # SPIFFE workload identity
 
-Status: proposed, not implemented. Nothing below exists in the code yet.
+Status: implemented, except for the Kubernetes run described under
+[End-to-end tests](#end-to-end-tests).
 
 ## Summary
 
@@ -149,13 +150,18 @@ later without changing existing IDs in history, but they are not part of v1.
 trust_domain = "example.org"
 audience = "scion://monorepo"     # unique to this Scion deployment
 token_ttl = "1h"                  # Scion token lifetime for SPIFFE logins
-bundle_url = "https://spire-bundle.example.internal/keys"
+bundle_url = "https://spire-bundle.example.internal/bundle"
 # bundle_file = "/run/spire/bundle/jwks.json"   # exactly one of url and file
 bundle_refresh = "5m"
 ```
 
 The section is optional; without it the server rejects `jwt_svid` logins. As everywhere in
 Scion, unknown keys and invalid values are startup errors. Exactly one bundle source is required.
+
+The source must serve a SPIFFE bundle, whose keys have `use: jwt-svid`, such as the output of
+`spire-server bundle show -format spiffe` or a SPIRE bundle endpoint. A SPIRE OIDC Discovery
+Provider does not qualify, because its keys have `use: sig`. Outside loopback, `bundle_url` must
+use `https`, and redirects are not followed.
 
 `token_ttl` is separate from `auth.token_ttl`, which defaults to 12h. Using that default would
 undo the benefit of short-lived SVIDs.
@@ -180,9 +186,12 @@ The server implements these rules, following JWT-SVID sections 2 to 4, and rejec
 else with `UNAUTHENTICATED`:
 
 1. The token is JWS Compact Serialization.
-2. `alg` is one of `RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`, `PS256`, `PS384`,
-   `PS512`, checked before any other processing. `none` and `HS*` are never accepted.
-3. `typ`, if present, is `JWT` or `JOSE`.
+2. `alg` is one of `RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `PS256`, `PS384`, `PS512`,
+   checked before any other processing. `none` and `HS*` are never accepted. The standard also
+   lists `ES512`, which is rejected: `ring` cannot verify it, and SPIRE never issues it, because
+   its key types are RSA, P-256 and P-384.
+3. `typ`, if present, is `JWT` or `JOSE`, and there is no `crit` header (RFC 7515 requires
+   rejecting extensions the verifier does not know).
 4. The signature verifies against a key with `use: jwt-svid` from the bundle. `kid` is optional
    in JWT-SVID, so a token without one is tried against each key of the trust domain.
 5. `exp` is present and in the future, with at most 30 seconds of leeway.
@@ -207,8 +216,8 @@ The server caches the keys and refreshes them every `bundle_refresh`.
 
 - Startup fails if the first load fails, like other invalid configuration (SPEC 6).
 - A failed refresh keeps the last good bundle and logs an error, like an invalid policy reload.
-- Without any usable key, login fails with `UNAVAILABLE`, as it does when GitHub is down
-  (SPEC 16.1 class 10). Existing tokens keep working.
+- Unknown key types in a bundle are skipped, so one new entry cannot invalidate the others.
+  A bundle without a single usable `jwt-svid` key counts as a failed load.
 - `/readyz` stays independent of the bundle. An unreachable bundle must not take down reads and
   writes for clients that already hold tokens.
 
@@ -243,7 +252,7 @@ tests below confirm that.
 | `scion-server` | `Login` branch, `GetServerInfo`, bundle refresh task, metric |
 | `scion-cli`, `scion-import` | Workload API client, re-exchange |
 | `schemas/v1/login.schema.json` | `method` value `spiffe` |
-| `scion-testkit` | Fake SVID issuer (see below) |
+| `scion-testkit` | `SvidIssuer`, `FakeSpiffe`, `FakeWorkloadApi` |
 | `SPEC.md` | Sections 4.3.8, 6.1, 6.2, 7.7, 12, 19.11 |
 
 The proto change and new JWT dependency are amendments, so log them in
@@ -257,17 +266,16 @@ a fake issuer, and only one gated suite uses real SPIRE.
 
 ### Test infrastructure
 
-Add `FakeSpiffe` to `scion-testkit`, next to `FakeGitHub`:
+`scion-testkit` provides three fakes:
 
-- It generates a signing key and serves a SPIFFE bundle on loopback.
-- It issues JWT-SVIDs with any `sub`, `aud`, `exp`, `alg`, `kid` and `typ`, so that tests can
-  build malformed tokens on purpose.
-- It rotates keys and can fail or stall on demand, for the bundle tests.
-- It serves a fake Workload API on a Unix socket for the CLI tests.
+- `SvidIssuer` signs JWT-SVIDs with any header and payload, so that tests can build malformed
+  tokens on purpose.
+- `FakeSpiffe` serves a bundle on loopback, and can change it, fail or stall on demand.
+- `FakeWorkloadApi` serves the Workload API on a Unix socket for the CLI tests.
 
 ### Build order
 
-Follow red-green-refactor with one behavior per commit. Each step leaves the workspace working:
+The feature was built test first, in this order:
 
 1. `Principal::Spiffe` parsing and round trip through the token.
 2. Validation rules, one test and one rule at a time.
@@ -284,16 +292,16 @@ Each case asserts `UNAUTHENTICATED` and an unchanged client-visible message, exc
 
 | Case | Expected |
 | --- | --- |
-| Valid token for each of the nine algorithms | Accepted; principal equals `sub` |
+| Valid token for each of the eight algorithms | Accepted; principal equals `sub` |
 | No `kid`, bundle has several keys | Accepted |
-| `alg: none`, `HS256`, or a value that is not on the list | Rejected before any signature check |
+| `alg: none`, `HS256`, `ES512`, or a value that is not on the list | Rejected before any signature check |
 | `HS256` signed with the public key as secret (key confusion) | Rejected |
 | Tampered header, payload or signature | Rejected |
 | Signed by a key outside the bundle | Rejected |
 | Key has `use: x509-svid` | Rejected |
 | `exp` missing, expired, or inside and outside the leeway | Rejected, except inside the leeway |
 | `aud` missing, wrong, or containing a second value | Rejected |
-| `typ` is neither `JWT` nor `JOSE` | Rejected |
+| `typ` is neither `JWT` nor `JOSE`, or a `crit` header is present | Rejected |
 | `sub` missing or not a SPIFFE ID | Rejected |
 | `sub` in another trust domain | Rejected |
 | `sub` with query, fragment, empty segment or `..` | Rejected |
@@ -357,16 +365,20 @@ Use a fake clock for expiry and refresh timing, so that no test sleeps.
 - `scion-import` works without `SCION_SERVICE_SECRET`.
 - Through `scion-daemon`: login succeeds, a cached object is served only to a principal with
   read access, and two agents on one daemon stay separate principals in `creator`.
-- A new client against an old server fails with a readable error rather than hanging.
 
-### End-to-end test with real SPIRE (gated)
+### End-to-end tests
 
 The fake issuer can share a misunderstanding with the validator, so one suite runs against real
-SPIRE. Name it `external_spiffe_*` and gate it on an environment variable, following the
-convention in [docs/testing.md](../testing.md), so it reports `SKIP` by default.
+SPIRE. [`scripts/test-spire.sh`](../../scripts/test-spire.sh) starts `spire-server` and
+`spire-agent` without Docker, using the `unix` workload attestor, and runs the gated
+`external_spiffe_*` tests, which report `SKIP` otherwise:
 
-Run it on a [kind](https://kind.sigs.k8s.io/) cluster with SPIRE, or with `spire-server` and
-`spire-agent` in `docker/compose.test.yml` using the `unix` workload attestor:
+1. `scion login --spiffe` with a real SVID, then `whoami`, commit and land, with the ID in history.
+2. An SVID minted for another audience is rejected.
+3. After a SPIRE JWT key rotation, new SVIDs are accepted without a Scion restart.
+
+Kubernetes behavior needs a cluster and is not automated. Check it once by hand on
+[kind](https://kind.sigs.k8s.io/) with SPIRE before relying on it:
 
 1. Create a `ClusterSPIFFEID`, and two service accounts, `reviewer` and `runner`, with different
    ACL rights. Give `reviewer` two replicas.
@@ -377,9 +389,7 @@ Run it on a [kind](https://kind.sigs.k8s.io/) cluster with SPIRE, or with `spire
 5. Replace a `reviewer` pod, and confirm that it keeps its rights without an ACL change.
 6. Stop issuing identities to `reviewer` by removing it from the `ClusterSPIFFEID` selector.
    Confirm that the next login fails, and that an existing token works only until it expires.
-7. Rotate the SPIRE signing key, and confirm that logins continue without a Scion restart.
-8. Stop `spire-server`, and confirm that existing tokens continue to work.
-9. Run the client with a stolen expired SVID, and confirm rejection.
+7. Stop `spire-server`, and confirm that existing tokens continue to work.
 
 ### Manual security review
 
@@ -404,8 +414,9 @@ The feature is done when:
 - [ ] GitHub and service login are unchanged.
 - [ ] `scripts/check.sh --full` passes, and the gated SPIRE suite passes.
 
-## Open questions
+## Decisions
 
-1. **Default `token_ttl`:** 1h is proposed. Shorter limits a stolen token but means more logins.
-2. **Bundle source in Kubernetes:** a URL is simplest for the server. The Workload API's
-   `FetchJWTBundles` would avoid polling, but the server then needs a SPIRE agent beside it.
+- **Token lifetime:** `auth.spiffe.token_ttl` defaults to 1h. Shorter limits a stolen token but
+  means more logins.
+- **Bundle source:** a URL or a file, polled by the server. The Workload API's `FetchJWTBundles`
+  would avoid polling, but the server would then need a SPIRE agent beside it.
