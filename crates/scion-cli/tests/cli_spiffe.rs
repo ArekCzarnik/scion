@@ -107,3 +107,24 @@ async fn login_stores_a_token_for_the_workload() {
     let out = scion(&s.env(), &["--json", "whoami"]).await;
     assert_eq!(out.json()["data"]["principal"], SUB);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn login_waits_for_the_identity() {
+    let s = Spiffe::start(false).await;
+    s.workload.deny_next(2);
+    let out = login(&s.env()).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(s.workload.calls(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_identity_fails_after_the_limit() {
+    let issuer = SvidIssuer::new();
+    let workload = FakeWorkloadApi::start(svid(&issuer)).await;
+    workload.deny_next(u32::MAX);
+    let err = fetch_jwt_svid(&workload.socket(), AUDIENCE, Duration::from_millis(250))
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("no identity issued"), "{err:?}");
+    assert!(workload.calls() >= 2);
+}
