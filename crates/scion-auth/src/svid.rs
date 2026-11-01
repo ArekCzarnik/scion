@@ -164,34 +164,28 @@ impl Audience {
     }
 }
 
+/// Whether `sig` verifies under `key`. The pairing of `alg` and key type is explicit, so a key can
+/// never be used with another family's algorithm.
 fn verify(alg: &str, key: &PublicKey, input: &[u8], sig: &[u8]) -> bool {
-    let rsa = match alg {
-        "RS256" => &signature::RSA_PKCS1_2048_8192_SHA256,
-        "RS384" => &signature::RSA_PKCS1_2048_8192_SHA384,
-        "RS512" => &signature::RSA_PKCS1_2048_8192_SHA512,
-        "PS256" => &signature::RSA_PSS_2048_8192_SHA256,
-        "PS384" => &signature::RSA_PSS_2048_8192_SHA384,
-        "PS512" => &signature::RSA_PSS_2048_8192_SHA512,
-        _ => {
-            return match (alg, key) {
-                ("ES256", PublicKey::P256(point)) => {
-                    UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, point)
-                        .verify(input, sig)
-                        .is_ok()
-                }
-                ("ES384", PublicKey::P384(point)) => {
-                    UnparsedPublicKey::new(&signature::ECDSA_P384_SHA384_FIXED, point)
-                        .verify(input, sig)
-                        .is_ok()
-                }
-                _ => false,
-            };
-        }
+    let ec = |params: &'static dyn signature::VerificationAlgorithm, point: &[u8]| {
+        UnparsedPublicKey::new(params, point)
+            .verify(input, sig)
+            .is_ok()
     };
-    match key {
-        PublicKey::Rsa { n, e } => signature::RsaPublicKeyComponents { n, e }
-            .verify(rsa, input, sig)
-            .is_ok(),
+    let rsa = |params: &'static signature::RsaParameters, n: &[u8], e: &[u8]| {
+        signature::RsaPublicKeyComponents { n, e }
+            .verify(params, input, sig)
+            .is_ok()
+    };
+    match (alg, key) {
+        ("ES256", PublicKey::P256(p)) => ec(&signature::ECDSA_P256_SHA256_FIXED, p),
+        ("ES384", PublicKey::P384(p)) => ec(&signature::ECDSA_P384_SHA384_FIXED, p),
+        ("RS256", PublicKey::Rsa { n, e }) => rsa(&signature::RSA_PKCS1_2048_8192_SHA256, n, e),
+        ("RS384", PublicKey::Rsa { n, e }) => rsa(&signature::RSA_PKCS1_2048_8192_SHA384, n, e),
+        ("RS512", PublicKey::Rsa { n, e }) => rsa(&signature::RSA_PKCS1_2048_8192_SHA512, n, e),
+        ("PS256", PublicKey::Rsa { n, e }) => rsa(&signature::RSA_PSS_2048_8192_SHA256, n, e),
+        ("PS384", PublicKey::Rsa { n, e }) => rsa(&signature::RSA_PSS_2048_8192_SHA384, n, e),
+        ("PS512", PublicKey::Rsa { n, e }) => rsa(&signature::RSA_PSS_2048_8192_SHA512, n, e),
         _ => false,
     }
 }

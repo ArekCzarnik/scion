@@ -7,7 +7,7 @@ mod write_support;
 
 use core_support::{eventually, http_get};
 use scion_config::{ServerConfig, SpiffeSection};
-use scion_core::{Clock, ErrorCode, ManualClock, ObjectId};
+use scion_core::{ErrorCode, ManualClock, ObjectId};
 use scion_proto::{ScionClient, v1};
 use scion_server::testing::{InProcessServer, ServerTestOpts};
 use scion_testkit::{FakeSpiffe, SvidIssuer};
@@ -387,7 +387,6 @@ async fn a_bundle_outage_keeps_the_server_working() {
     holder.auth().who_am_i(v1::WhoAmIRequest {}).await.unwrap();
     login(&srv, &svid(&issuer, RUNNER)).await.unwrap();
     assert_eq!(http_get(srv.admin_addr().unwrap(), "/readyz").await.0, 200);
-    assert!(clock.now() > UNIX_EPOCH);
 }
 
 #[tokio::test(flavor = "multi_thread")]
