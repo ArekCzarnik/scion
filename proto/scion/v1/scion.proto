@@ -587,6 +587,7 @@ message LoginRequest {
   oneof credential {
     string github_access_token = 1;
     ServiceCredential service = 2;
+    string jwt_svid = 3;
   }
 }
 

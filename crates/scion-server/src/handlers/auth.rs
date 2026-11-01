@@ -26,6 +26,10 @@ fn unix_seconds(t: SystemTime) -> i64 {
 /// - `service`: SHA-256 of the secret compared in constant time against
 ///   `auth.service_principals`; a wrong secret or unknown name gives UNAUTHENTICATED.
 ///
+/// - `jwt_svid`: validated against the cached SPIFFE bundle; the principal is the SPIFFE ID and
+///   the token lifetime is `auth.spiffe.token_ttl`. A rejected SVID, or the feature being off,
+///   gives UNAUTHENTICATED. The SVID is neither stored nor logged.
+///
 /// Returns the Scion token, the principal id string and the expiry (Unix seconds).
 pub async fn login(
     ctx: &Arc<AppContext>,
@@ -50,6 +54,20 @@ pub async fn login(
                 id: Some(user.id),
             }
         }
+        Some(Credential::JwtSvid(token)) => {
+            let Some(spiffe) = &ctx.spiffe else {
+                return Err(to_status(&ScionError::unauthenticated(
+                    "JWT-SVID login is not enabled",
+                )));
+            };
+            if token.is_empty() {
+                return Err(to_status(&scion_proto::convert::missing_field("jwt_svid")));
+            }
+            spiffe
+                .validator
+                .validate(token, &spiffe.bundles.current(), ctx.clock.now())
+                .map_status()?
+        }
         Some(Credential::Service(cred)) => {
             if !ctx
                 .services
@@ -65,11 +83,12 @@ pub async fn login(
             })?
         }
     };
+    let ttl = match (&principal, &ctx.spiffe) {
+        (Principal::Spiffe(_), Some(spiffe)) => spiffe.token_ttl,
+        _ => ctx.config.auth.token_ttl,
+    };
     let now = ctx.clock.now();
-    let (token, claims) = ctx
-        .keyring
-        .issue(&principal, ctx.config.auth.token_ttl, now)
-        .map_status()?;
+    let (token, claims) = ctx.keyring.issue(&principal, ttl, now).map_status()?;
     annotate(&req, |f| f.principal = Some(principal.id_string()));
     Ok(Response::new(v1::LoginResponse {
         token,
