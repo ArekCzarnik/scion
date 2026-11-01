@@ -89,7 +89,7 @@ bytes, while SPIFFE implementations must support IDs of up to 2048 bytes. So thi
 pub enum Principal {
     GitHub { login: String, id: Option<u64> },
     Service(String),
-    Spiffe(String), // the full ID: spiffe://example.org/ns/agents/sa/reviewer
+    Spiffe(String), // the full ID: spiffe://example.org/agent/reviewer
 }
 ```
 
@@ -98,6 +98,32 @@ principals and stored `creator` values do not change.
 
 The principal keeps the path exactly as issued. Scion does no case folding or normalization,
 because two IDs that differ in any byte are different identities.
+
+### Identity naming
+
+Each Kubernetes service account gets one SPIFFE ID. Replicas of an agent share it, so the audit
+trail identifies the agent, not the individual pod.
+
+IDs use the form `spiffe://<trust-domain>/agent/<name>` and contain no Kubernetes namespace.
+`creator` stores the ID permanently, so it should name the agent rather than where it runs. The
+`ns/<namespace>/sa/<name>` form is only a common SPIRE template, not a SPIFFE requirement.
+Namespace and service account stay in the registration's selectors, where they still decide which
+workload receives the ID:
+
+```sh
+spire-server entry create \
+  -spiffeID spiffe://example.org/agent/reviewer \
+  -parentID spiffe://example.org/spire-agent \
+  -selector k8s:ns:agents \
+  -selector k8s:sa:reviewer
+```
+
+With SPIRE Controller Manager, the same comes from a `ClusterSPIFFEID` whose `spiffeIDTemplate` is
+`spiffe://{{ .TrustDomain }}/agent/{{ .PodSpec.ServiceAccountName }}`.
+
+Scion treats the path as opaque and cannot enforce this form. Without the namespace, two service
+accounts with the same name in different namespaces would map to one ID, so operators must keep
+agent names unique across namespaces and clusters, and must scope the template accordingly.
 
 ### Configuration
 
@@ -123,12 +149,12 @@ undo the benefit of short-lived SVIDs.
 
 ```toml
 [groups]
-writers = ["spiffe://example.org/ns/agents/sa/reviewer", "group:ci"]
-ci = ["spiffe://example.org/ns/ci/sa/runner"]
+writers = ["spiffe://example.org/agent/reviewer", "group:ci"]
+ci = ["spiffe://example.org/ci/runner"]
 ```
 
 Listing every workload is enough for v1. Prefix members such as
-`spiffe://example.org/ns/agents/*` are a later extension, because they change the way
+`spiffe://example.org/agent/*` are a later extension, because they change the way
 `groups_of` evaluates membership.
 
 ### Validation
@@ -353,9 +379,5 @@ The feature is done when:
 ## Open questions
 
 1. **Default `token_ttl`:** 1h is proposed. Shorter limits a stolen token but means more logins.
-2. **Principal format in history:** `creator` stores the ID permanently. Should Kubernetes
-   namespaces and service accounts be visible there, or is that too much detail?
-3. **Stable or per-pod IDs:** per-pod IDs give the finest audit trail, but they cannot be listed
-   in `acl.toml` without the prefix members that v1 omits. Service-account IDs work today.
-4. **Bundle source in Kubernetes:** a URL is simplest for the server. The Workload API's
+2. **Bundle source in Kubernetes:** a URL is simplest for the server. The Workload API's
    `FetchJWTBundles` would avoid polling, but the server then needs a SPIRE agent beside it.
