@@ -5,6 +5,7 @@
 use scion_auth::{SvidBundle, SvidValidator};
 use scion_core::{ErrorCode, Principal, Result};
 use scion_testkit::SvidIssuer;
+use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const AUDIENCE: &str = "scion://monorepo";
@@ -39,4 +40,22 @@ fn valid_svid_gives_the_subject_as_principal() {
         validate(&issuer, &token).unwrap(),
         Principal::Spiffe(SUB.into())
     );
+}
+
+#[test]
+fn every_supported_algorithm_is_accepted() {
+    let issuer = SvidIssuer::new();
+    for alg in [
+        "ES256", "ES384", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
+    ] {
+        let token = issuer.sign(
+            &json!({"alg": alg}),
+            &json!({"sub": SUB, "aud": [AUDIENCE], "exp": exp_in(300)}),
+        );
+        assert_eq!(
+            validate(&issuer, &token).unwrap(),
+            Principal::Spiffe(SUB.into()),
+            "{alg}"
+        );
+    }
 }
