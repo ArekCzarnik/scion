@@ -280,8 +280,15 @@ The workspace builds four executables: `scion`, `scion-server`, `scion-daemon`, 
 
 ## Use
 
-Running the service requires CockroachDB, an S3-compatible bucket, TLS certificates, an
-Ed25519 signing key, and an access policy. Configure the server using
+To run the server and its backends on one machine, use
+[Docker Compose](docs/docker-compose.md):
+
+```sh
+docker compose -f docker/compose.yml up -d --build --wait
+```
+
+Otherwise, running the service requires CockroachDB, an S3-compatible bucket, TLS certificates,
+an Ed25519 signing key, and an access policy. Configure the server using
 [SPEC section 6](SPEC.md#6-configuration-specification), then start it:
 
 ```sh
