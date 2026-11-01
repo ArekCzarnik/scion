@@ -22,7 +22,7 @@
           "type": "string"
         },
         "principal": {
-          "description": "The principal the server issued the token for (`github:<login>`, `service:<name>` or a SPIFFE ID).",
+          "description": "The principal the server issued the token for (`github:<login>`, `service:<name>` or a\nSPIFFE ID).",
           "type": "string"
         }
       },
