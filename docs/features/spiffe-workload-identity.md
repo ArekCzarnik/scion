@@ -24,11 +24,11 @@ With this feature:
 
 | Goal | How it is met |
 | --- | --- |
-| Each agent has its own identity | The principal is the workload's SPIFFE ID |
+| Each agent has its own identity | The principal is a SPIFFE ID that names the agent and its pod |
 | No shared secret | No static credential is stored in pods or volumes |
 | Identities are short-lived | SVIDs expire in minutes; Scion tokens get their own short TTL |
-| Rights per agent | `acl.toml` can name a SPIFFE ID |
-| Audit per agent | `creator`, the ref log, `audit_log` and RPC logs carry that ID |
+| Rights per agent | `acl.toml` grants rights to an agent's ID prefix |
+| Audit per agent and pod | `creator`, the ref log, `audit_log` and RPC logs carry that ID |
 
 ## Non-goals
 
@@ -89,7 +89,7 @@ bytes, while SPIFFE implementations must support IDs of up to 2048 bytes. So thi
 pub enum Principal {
     GitHub { login: String, id: Option<u64> },
     Service(String),
-    Spiffe(String), // the full ID: spiffe://example.org/agent/reviewer
+    Spiffe(String), // the full ID: spiffe://example.org/ns/agents/sa/reviewer/pod/<uid>
 }
 ```
 
@@ -101,29 +101,50 @@ because two IDs that differ in any byte are different identities.
 
 ### Identity naming
 
-Each Kubernetes service account gets one SPIFFE ID. Replicas of an agent share it, so the audit
-trail identifies the agent, not the individual pod.
+Every pod gets its own SPIFFE ID, which combines a stable agent part with the pod's UID:
 
-IDs use the form `spiffe://<trust-domain>/agent/<name>` and contain no Kubernetes namespace.
-`creator` stores the ID permanently, so it should name the agent rather than where it runs. The
-`ns/<namespace>/sa/<name>` form is only a common SPIRE template, not a SPIFFE requirement.
-Namespace and service account stay in the registration's selectors, where they still decide which
-workload receives the ID:
-
-```sh
-spire-server entry create \
-  -spiffeID spiffe://example.org/agent/reviewer \
-  -parentID spiffe://example.org/spire-agent \
-  -selector k8s:ns:agents \
-  -selector k8s:sa:reviewer
+```text
+spiffe://example.org/ns/agents/sa/reviewer/pod/f47ac10b-58cc-4372-a567-0e02b2c3d479
+                     └────── rights ─────┘ └───────────── audit ──────────────┘
 ```
 
-With SPIRE Controller Manager, the same comes from a `ClusterSPIFFEID` whose `spiffeIDTemplate` is
-`spiffe://{{ .TrustDomain }}/agent/{{ .PodSpec.ServiceAccountName }}`.
+- `ns/<namespace>/sa/<service-account>` names the agent. It is stable across restarts, and ACLs
+  refer to it. The namespace keeps two service accounts of the same name apart.
+- `pod/<uid>` names one pod. The UID is used rather than the pod name because names can return,
+  for example with a StatefulSet, while `creator` keeps the ID permanently.
 
-Scion treats the path as opaque and cannot enforce this form. Without the namespace, two service
-accounts with the same name in different namespaces would map to one ID, so operators must keep
-agent names unique across namespaces and clusters, and must scope the template accordingly.
+The ID comes from a `ClusterSPIFFEID` for SPIRE Controller Manager:
+
+```yaml
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: scion-agents
+spec:
+  spiffeIDTemplate: >-
+    spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}/pod/{{ .PodMeta.UID }}
+  namespaceSelector:
+    matchLabels:
+      scion.example.org/agents: "true"
+```
+
+Scion treats the path as opaque and does not enforce this form; only the ACL gives it meaning. If
+several clusters share a trust domain, add `{{ .ClusterName }}` to the template, or the same
+namespace and service account in two clusters would receive the same rights.
+
+Consequences to plan for:
+
+- **Audit needs an external record.** A UID stays unique, but Kubernetes forgets it when the pod
+  is deleted, and `kubectl` cannot select pods by UID. To trace a commit to a pod's image or
+  node after that, keep the Kubernetes audit log or another record of UID, name, node and image
+  for as long as the audit requires. Scion does not store this.
+- **Pods wait for their identity.** Each pod needs a new registration entry, which takes time to
+  reach the SPIRE agent. Until then the Workload API answers `PermissionDenied`, so the client
+  must retry (see [Client](#client)).
+- **Short-lived pods add load on SPIRE.** Measure this before running many of them.
+- **Rate limits apply per pod.** Limits are keyed by principal, so ten replicas of one agent get
+  ten times `rate_limit.per_principal_rps`. `max_inflight` remains the overall bound. Stale
+  entries do not accumulate, as the limiter already prunes them.
 
 ### Configuration
 
@@ -145,17 +166,34 @@ undo the benefit of short-lived SVIDs.
 
 ### Access policy
 
-`acl.toml` accepts SPIFFE IDs wherever it accepts other principals:
+`acl.toml` accepts SPIFFE IDs wherever it accepts other principals. UIDs are unknown in advance,
+so a member can end in `/*`:
 
 ```toml
 [groups]
-writers = ["spiffe://example.org/agent/reviewer", "group:ci"]
-ci = ["spiffe://example.org/ci/runner"]
+reviewers = ["spiffe://example.org/ns/agents/sa/reviewer/*"]
+runners = ["spiffe://example.org/ns/ci/sa/runner/*"]
+writers = ["group:reviewers", "group:runners"]
 ```
 
-Listing every workload is enough for v1. Prefix members such as
-`spiffe://example.org/agent/*` are a later extension, because they change the way
-`groups_of` evaluates membership.
+Rules for prefix members:
+
+- `*` is allowed only as the whole last segment. It cannot occur in a SPIFFE ID, so the form is
+  unambiguous.
+- Matching is by path segment, and `*` stands for one or more segments.
+  `.../sa/reviewer/*` matches `.../sa/reviewer/pod/<uid>`, but neither `.../sa/reviewer` nor
+  `.../sa/reviewer2/pod/<uid>`.
+- At least one segment must precede `*`. `spiffe://example.org/*` is a validation error, because
+  it would grant rights to every workload in the trust domain.
+- `spiffe://example.org/ns/agents/*` is valid and covers every service account in that namespace.
+- A member without `*` matches one exact ID, which suits granting rights to a single pod.
+
+Today a principal resolves to exact members that are looked up in resolved sets (`scion-policy`,
+`Member`). Prefix members cannot use that lookup, so they need a separate check. Keep it linear
+only in the number of prefix members, and evaluate it once per authorization.
+
+Admin rights can use prefix members too, but an `admin` block that matches a whole namespace gives
+every pod there those rights, so name a narrow service account.
 
 ### Validation
 
@@ -203,6 +241,9 @@ Bundle age is exposed as a metric so that operators see a failing refresh before
 for the advertised audience. It then calls `Login` and stores the token in the credentials file
 as usual.
 
+A new pod may not have its identity yet, so `PermissionDenied` from the Workload API is retried
+with backoff for up to 60 seconds, then reported as an error.
+
 Agents should not have to log in by hand. When `SPIFFE_ENDPOINT_SOCKET` is set and a request
 fails with `UNAUTHENTICATED`, the CLI repeats this exchange once, extending the existing GitHub
 path (`can_reexchange` and `reexchange` in `crates/scion-cli/src/cli/ctx.rs`). `scion-import`
@@ -219,7 +260,7 @@ tests below confirm that.
 | `scion-core` | `Principal::Spiffe` |
 | `scion-auth` | SVID validation, bundle cache, token issue and parse for the new variant |
 | `scion-config` | `[auth.spiffe]` |
-| `scion-policy` | SPIFFE members |
+| `scion-policy` | SPIFFE members, exact and prefix |
 | `scion-server` | `Login` branch, `GetServerInfo`, bundle refresh task, metric |
 | `scion-cli`, `scion-import` | Workload API client, re-exchange |
 | `schemas/v1/login.schema.json` | `method` value `spiffe` |
@@ -252,10 +293,10 @@ Follow red-green-refactor with one behavior per commit. Each step leaves the wor
 1. `Principal::Spiffe` parsing and round trip through the token.
 2. Validation rules, one test and one rule at a time.
 3. `[auth.spiffe]` parsing.
-4. ACL members.
+4. Exact ACL members, then prefix members.
 5. Bundle cache and refresh.
 6. `Login` and `GetServerInfo`.
-7. CLI login, then re-exchange, then `scion-import`.
+7. CLI login, then the identity retry, then re-exchange, then `scion-import`.
 8. Gated SPIRE suite.
 
 ### Unit tests: validation (`scion-auth`)
@@ -289,8 +330,31 @@ Add a proptest that arbitrary byte strings never panic and never validate.
 - Policy: a SPIFFE member grants read, write and ref rights. A group containing one resolves
   through `groups_of`. IDs that differ only in case are different principals. A malformed member
   fails validation and keeps the last good policy on reload.
+- Principal length: an ID at the 2048-byte limit round-trips through token and `creator`.
 - Principal: `parse(id_string(p)) == p` for all three variants, and existing `github:` and
   `service:` strings parse unchanged.
+
+### Unit tests: prefix members (`scion-policy`)
+
+| Member | Principal | Expected |
+| --- | --- | --- |
+| `.../sa/reviewer/*` | `.../sa/reviewer/pod/<uid>` | Match |
+| `.../sa/reviewer/*` | `.../sa/reviewer` | No match |
+| `.../sa/reviewer/*` | `.../sa/reviewer2/pod/<uid>` | No match |
+| `.../sa/reviewer/*` | `.../sa/REVIEWER/pod/<uid>` | No match |
+| `.../sa/reviewer/*` | Same path in another trust domain | No match |
+| `.../sa/reviewer/*` | `service:reviewer` or `github:reviewer` | No match |
+| `.../ns/agents/*` | `.../ns/agents/sa/x/pod/<uid>` | Match |
+| `.../ns/agents/sa/x/pod/<uid>` | That exact ID | Match |
+| `.../ns/agents/sa/x/pod/<uid>` | The same ID for another pod | No match |
+
+These members fail validation: `spiffe://example.org/*`, `.../re*`, `.../*/pod`, `.../*/*`, and
+any member with a query or fragment.
+
+Also test longest-prefix behavior with paths, `groups_of` for a principal that matches through a
+nested group, and a proptest that a principal matches a prefix member exactly when its segments
+start with the member's segments. A complexity test confirms that authorization cost does not
+grow with the number of exact members.
 
 ### Server tests (`crates/scion-server/tests`)
 
@@ -302,6 +366,8 @@ Use the in-process server with loopback TLS, in the style of `core_auth.rs`:
 - GitHub and service login behave as before with the section present.
 - Authorization: agent A may write `/a` and is denied `/b`, while agent B gets the reverse, using
   two SVIDs and one server.
+- Pods: two pods of one agent get the same rights through one prefix member, but their
+  `creator` values differ. A restarted pod with a new UID needs no ACL change.
 - Attribution: after commit and land, `creator` and the ref log hold the SPIFFE ID, and setting
   `SCION_AUTHOR` does not change `creator`. A forced update appears in `audit_log` with that ID.
 - Logs: run a login and scan the captured output to confirm that the token never appears.
@@ -327,7 +393,9 @@ Use a fake clock for expiry and refresh timing, so that no test sleeps.
 
 - `scion login --spiffe` against the fake Workload API writes credentials with mode `0600` and
   reports method `spiffe` in `--json`, valid against `schemas/v1/login.schema.json`.
-- Workload API missing or returning no identity: a clear error and a non-zero exit code.
+- Workload API missing: a clear error and a non-zero exit code.
+- Workload API answers `PermissionDenied`, then issues an identity: login succeeds. If the
+  identity never arrives, login fails after the time limit. Use a fake clock.
 - Expired Scion token with `SPIFFE_ENDPOINT_SOCKET` set: the command succeeds after exactly one
   re-exchange. If the retry also fails, the error is shown and there is no loop.
 - `scion-import` works without `SCION_SERVICE_SECRET`.
@@ -344,12 +412,15 @@ convention in [docs/testing.md](../testing.md), so it reports `SKIP` by default.
 Run it on a [kind](https://kind.sigs.k8s.io/) cluster with SPIRE, or with `spire-server` and
 `spire-agent` in `docker/compose.test.yml` using the `unix` workload attestor:
 
-1. Register two workloads, `reviewer` and `runner`, with different ACL rights.
-2. From each workload, run `scion login --spiffe` and `scion whoami`.
-3. Commit and land from both, then check `scion log` and `creator`.
+1. Create a `ClusterSPIFFEID`, and two service accounts, `reviewer` and `runner`, with different
+   ACL rights. Give `reviewer` two replicas.
+2. From each pod, run `scion login --spiffe` and `scion whoami`. Confirm that this also works
+   right after pod start, while the registration entry is still propagating.
+3. Commit and land from all pods. Confirm that `creator` holds each pod's own UID, by comparing it
+   with `kubectl get pod -o jsonpath='{.metadata.uid}'`.
 4. Confirm that `reviewer` is denied the path that only `runner` may write.
-5. Delete the `reviewer` registration entry. Confirm that the next login fails, and that an
-   existing token works only until it expires.
+5. Delete a `reviewer` pod. Confirm that its replacement gets a new UID and the same rights without
+   an ACL change, and that the old pod's token works only until it expires.
 6. Rotate the SPIRE signing key, and confirm that logins continue without a Scion restart.
 7. Stop `spire-server`, and confirm that existing tokens continue to work.
 8. Run the client with a stolen expired SVID, and confirm rejection.
@@ -361,16 +432,20 @@ Before merging, have someone check that:
 - `alg` is pinned before the key lookup, and the JWT library cannot be steered by the token header.
 - The bundle URL is `https` outside tests, with certificates verified.
 - The audience is unique to this deployment and documented as such.
-- No log line, error or metric label contains a token. Consider whether SPIFFE IDs in metric
-  labels would create unbounded cardinality.
+- No log line, error or metric label contains a token.
+- Metrics never use the principal as a label, since per-pod IDs would make its cardinality
+  unbounded.
+- Nothing in the ACL grants a whole trust domain, and admin members stay narrow.
 
 ### Acceptance criteria
 
 The feature is done when:
 
 - [ ] Two agents with separate SPIFFE IDs work on one server without any service secret.
-- [ ] Each one is limited to its own ACL rights.
-- [ ] `creator`, the ref log and RPC logs identify each agent.
+- [ ] Each one is limited to its own ACL rights, with one prefix entry per agent.
+- [ ] Replacing a pod needs no ACL change.
+- [ ] `creator`, the ref log and RPC logs identify each agent and pod.
+- [ ] The docs say how to keep the UID-to-pod record that audits need.
 - [ ] A lost agent pod leaves nothing that works after `auth.spiffe.token_ttl`.
 - [ ] Key rotation and a SPIRE outage need no Scion restart.
 - [ ] GitHub and service login are unchanged.
