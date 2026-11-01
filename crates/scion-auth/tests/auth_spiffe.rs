@@ -109,3 +109,26 @@ fn expiry_is_enforced_with_30_seconds_of_leeway() {
     );
     assert_rejected(validate(&issuer, &bad_exp));
 }
+
+#[test]
+fn audience_must_be_exactly_ours() {
+    let issuer = SvidIssuer::new();
+    let with_aud = |aud: serde_json::Value| {
+        issuer.sign(
+            &json!({"alg": "ES256"}),
+            &json!({"sub": SUB, "aud": aud, "exp": exp_in(300)}),
+        )
+    };
+    assert!(validate(&issuer, &with_aud(json!(AUDIENCE))).is_ok());
+    assert!(validate(&issuer, &with_aud(json!([AUDIENCE]))).is_ok());
+    assert_rejected(validate(&issuer, &with_aud(json!("other"))));
+    assert_rejected(validate(&issuer, &with_aud(json!(["other"]))));
+    assert_rejected(validate(&issuer, &with_aud(json!([]))));
+    assert_rejected(validate(&issuer, &with_aud(json!([AUDIENCE, "other"]))));
+    assert_rejected(validate(&issuer, &with_aud(json!(7))));
+    let no_aud = issuer.sign(
+        &json!({"alg": "ES256"}),
+        &json!({"sub": SUB, "exp": exp_in(300)}),
+    );
+    assert_rejected(validate(&issuer, &no_aud));
+}
