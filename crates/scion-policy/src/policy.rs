@@ -101,6 +101,7 @@ fn principal_atoms(p: &Principal) -> Vec<Member> {
             v
         }
         Principal::Service(name) => vec![Member::Service(name.clone())],
+        Principal::Spiffe(_) => Vec::new(),
     }
 }
 

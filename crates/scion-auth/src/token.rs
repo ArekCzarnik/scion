@@ -207,7 +207,7 @@ impl Keyring {
             .ok_or_else(|| config_error("token lifetime overflows"))?;
         let gid = match sub {
             Principal::GitHub { id, .. } => *id,
-            Principal::Service(_) => None,
+            Principal::Service(_) | Principal::Spiffe(_) => None,
         };
         let mut claims = Claims {
             sub: sub.clone(),

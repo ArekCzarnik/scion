@@ -309,6 +309,8 @@ target.
 
 - `github:<login>` (humans, via GitHub login), with stable numeric id carried in the token.
 - `service:<name>` (agents, CI, importer), via configured secrets.
+- `spiffe://<trust-domain>/<path>` (workloads), via JWT-SVID. The full SPIFFE ID is the principal,
+  compared byte for byte.
 - `group:<name>` (policy only; never authenticates).
 
 #### 4.3.9 Redaction
