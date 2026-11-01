@@ -129,7 +129,27 @@ struct Header {
 #[derive(Deserialize)]
 struct Payload {
     sub: String,
+    aud: Audience,
     exp: f64,
+}
+
+/// RFC 7519 allows `aud` as a single string or as a list.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Audience {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Audience {
+    /// A token with a second audience could be replayed by that audience, so this accepts
+    /// exactly one value.
+    fn is_only(&self, audience: &str) -> bool {
+        match self {
+            Audience::One(a) => a == audience,
+            Audience::Many(list) => matches!(&list[..], [a] if a == audience),
+        }
+    }
 }
 
 fn verify(alg: &str, key: &PublicKey, input: &[u8], sig: &[u8]) -> bool {
@@ -173,7 +193,6 @@ fn decode_json<T: serde::de::DeserializeOwned>(part: &str, reason: &'static str)
 pub struct SvidValidator {
     #[allow(dead_code)]
     trust_domain: String,
-    #[allow(dead_code)]
     audience: String,
 }
 
@@ -214,6 +233,9 @@ impl SvidValidator {
             .as_secs_f64();
         if now_secs >= payload.exp + EXP_LEEWAY_SECS {
             return Err(rejected("expired"));
+        }
+        if !payload.aud.is_only(&self.audience) {
+            return Err(rejected("wrong audience"));
         }
         Principal::parse(&payload.sub).map_err(|_| rejected("subject is not a SPIFFE ID"))
     }
