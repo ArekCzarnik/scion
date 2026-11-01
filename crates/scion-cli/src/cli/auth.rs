@@ -2,10 +2,11 @@
 
 use super::CliIo;
 use super::args::LoginArgs;
-use super::ctx::{Ctx, ENV_SERVICE_SECRET, Reply, github_login};
+use super::ctx::{Ctx, ENV_SERVICE_SECRET, Reply, github_login, spiffe_login};
 use super::error::{CliResult, local};
 use crate::output::views::{LoginData, WhoamiData};
 use scion_auth::device_flow;
+use scion_proto::workload::ENV_SOCKET;
 use scion_proto::{error_from_status, v1};
 use scion_wc::credentials::{self, Credentials};
 
@@ -13,7 +14,7 @@ use scion_wc::credentials::{self, Credentials};
 const DEFAULT_OAUTH_BASE: &str = "https://github.com";
 
 /// `scion login`: the GitHub device flow against the server's advertised client id
-/// (SPEC 12.2), or `--service NAME` (SPEC 12.3). The credentials file is written with mode
+/// (SPEC 12.2), `--service NAME` (SPEC 12.3), or `--spiffe` (SPEC 12.3a). The credentials file is written with mode
 /// 0600 and, for GitHub logins, keeps the GitHub token for silent re-exchange.
 pub(crate) async fn login(
     ctx: &mut Ctx<'_>,
@@ -24,6 +25,12 @@ pub(crate) async fn login(
     let path = ctx.credentials_path()?;
     let (anon, endpoint) = ctx.connect_with(root.as_deref(), None).await?;
     let (resp, method, gh_token) = match &a.service {
+        None if a.spiffe => {
+            let socket = ctx
+                .var(ENV_SOCKET)
+                .ok_or_else(|| local(format!("no Workload API: set {ENV_SOCKET}")))?;
+            (spiffe_login(&anon, &socket).await?, "spiffe", None)
+        }
         Some(name) => {
             let secret = match ctx.var(ENV_SERVICE_SECRET) {
                 Some(s) => s,

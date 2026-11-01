@@ -10,7 +10,7 @@
 
 use crate::env::{Env, decode, read_file};
 use crate::error::ConfigError;
-use scion_core::Limits;
+use scion_core::{Limits, Principal};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -120,6 +120,29 @@ pub struct AuthSection {
     /// `[[auth.service_principals]]` (default none).
     #[serde(default)]
     pub service_principals: Vec<ServicePrincipalConfig>,
+    /// `[auth.spiffe]`: JWT-SVID login for workloads; absent means disabled.
+    #[serde(default)]
+    pub spiffe: Option<SpiffeSection>,
+}
+
+/// `[auth.spiffe]` (SPEC 6.1, 12.3a).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpiffeSection {
+    /// The only trust domain accepted.
+    pub trust_domain: String,
+    /// The audience a JWT-SVID must carry; unique to this deployment.
+    pub audience: String,
+    /// Scion token lifetime for SPIFFE logins (default 1h), humantime syntax.
+    #[serde(default = "default_spiffe_token_ttl", with = "humantime_serde")]
+    pub token_ttl: Duration,
+    /// SPIFFE bundle URL. Exactly one of `bundle_url` and `bundle_file` is required.
+    pub bundle_url: Option<String>,
+    /// SPIFFE bundle file.
+    pub bundle_file: Option<PathBuf>,
+    /// How often to reload the bundle (default 5m), humantime syntax.
+    #[serde(default = "default_spiffe_bundle_refresh", with = "humantime_serde")]
+    pub bundle_refresh: Duration,
 }
 
 /// `[[auth.service_principals]]` (SPEC 6.1, 12).
@@ -276,6 +299,13 @@ fn default_token_ttl() -> Duration {
     Duration::from_secs(12 * 3600)
 }
 
+fn default_spiffe_token_ttl() -> Duration {
+    Duration::from_secs(3600)
+}
+fn default_spiffe_bundle_refresh() -> Duration {
+    Duration::from_secs(300)
+}
+
 fn require(ok: bool, key: &str, msg: &str) -> Result<(), ConfigError> {
     if ok {
         Ok(())
@@ -288,6 +318,54 @@ fn is_lower_hex_sha256(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `https://`, or `http://` to a loopback host, which only tests and sidecars use.
+fn is_acceptable_bundle_url(url: &str) -> bool {
+    url.starts_with("https://")
+        || ["http://127.0.0.1", "http://localhost", "http://[::1]"]
+            .iter()
+            .any(|prefix| {
+                url.strip_prefix(prefix)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
+            })
+}
+
+impl SpiffeSection {
+    fn validate(&self) -> Result<(), ConfigError> {
+        require(
+            Principal::parse(&format!("spiffe://{}/x", self.trust_domain)).is_ok(),
+            "auth.spiffe.trust_domain",
+            "must be a SPIFFE trust domain name",
+        )?;
+        require(
+            !self.audience.is_empty(),
+            "auth.spiffe.audience",
+            "must not be empty",
+        )?;
+        require(
+            !self.token_ttl.is_zero(),
+            "auth.spiffe.token_ttl",
+            "must be positive",
+        )?;
+        require(
+            !self.bundle_refresh.is_zero(),
+            "auth.spiffe.bundle_refresh",
+            "must be positive",
+        )?;
+        require(
+            self.bundle_url.is_some() != self.bundle_file.is_some(),
+            "auth.spiffe.bundle_url",
+            "exactly one of bundle_url and bundle_file is required",
+        )?;
+        require(
+            self.bundle_url
+                .as_deref()
+                .is_none_or(is_acceptable_bundle_url),
+            "auth.spiffe.bundle_url",
+            "must use https",
+        )
+    }
 }
 
 impl ServerConfig {
@@ -346,6 +424,9 @@ impl ServerConfig {
                 &format!("{key}.secret_sha256"),
                 "must be 64 lowercase hex characters",
             )?;
+        }
+        if let Some(spiffe) = &self.auth.spiffe {
+            spiffe.validate()?;
         }
         let l = &self.limits;
         for (name, v) in [
@@ -446,6 +527,7 @@ impl ServerConfig {
                 token_ttl: default_token_ttl(),
                 signing_keys: vec![dir.join("signing.ed25519.pem")],
                 service_principals: Vec::new(),
+                spiffe: None,
             },
             policy: PolicySection {
                 path: dir.join("acl.toml"),

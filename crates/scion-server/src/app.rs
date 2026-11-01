@@ -21,7 +21,9 @@ use crate::interceptor::{AuthService, BoxSvc, HttpReq, HttpResp, RequestIdServic
 use crate::logging::LogService;
 use crate::ratelimit::{GovernorService, Limits, ShedService};
 use crate::redaction_set::RedactionSet;
-use scion_auth::{GitHubClient, Keyring, ServicePrincipals, Verifier};
+use scion_auth::{
+    BundleCache, BundleSource, GitHubClient, Keyring, ServicePrincipals, SvidValidator, Verifier,
+};
 use scion_config::ServerConfig;
 use scion_core::{Clock, ErrorCode, Principal, Result, ScionError, Tier, subcode};
 use scion_derived::{DeriveConfig, DeriveMetrics, DeriveMode, DerivedEngine, Registry};
@@ -42,7 +44,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use tower::util::BoxCloneSyncService;
@@ -80,6 +82,8 @@ pub struct ServerDeps {
 
 /// Everything a handler needs (PLAN 1.4, 2.14).
 pub struct AppContext {
+    /// JWT-SVID login; `None` when `[auth.spiffe]` is absent.
+    pub spiffe: Option<SpiffeAuth>,
     /// Storage bundle.
     pub storage: Storage,
     /// Object facade.
@@ -222,6 +226,59 @@ pub struct ServerApp {
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+/// JWT-SVID login state (`[auth.spiffe]`, SPEC 12.3a).
+pub struct SpiffeAuth {
+    /// Validation rules for this trust domain and audience.
+    pub validator: SvidValidator,
+    /// The signing keys. `Login` only reads this cache.
+    pub bundles: Arc<BundleCache>,
+    /// Lifetime of tokens issued to SPIFFE logins.
+    pub token_ttl: Duration,
+}
+
+impl SpiffeAuth {
+    /// `None` when disabled; an unreadable bundle fails startup (SPEC 6).
+    async fn from_config(config: &ServerConfig, now: SystemTime) -> Result<Option<Self>> {
+        let Some(section) = &config.auth.spiffe else {
+            return Ok(None);
+        };
+        let source = match (&section.bundle_url, &section.bundle_file) {
+            (Some(url), _) => BundleSource::Url(url.clone()),
+            (None, Some(file)) => BundleSource::File(file.clone()),
+            (None, None) => {
+                return Err(ScionError::new(
+                    ErrorCode::InvalidArgument,
+                    "auth.spiffe needs a bundle source",
+                ));
+            }
+        };
+        Ok(Some(SpiffeAuth {
+            validator: SvidValidator::new(&section.trust_domain, &section.audience),
+            bundles: Arc::new(BundleCache::load(source, now).await?),
+            token_ttl: section.token_ttl,
+        }))
+    }
+}
+
+/// Reload the bundle every `every` and publish its age. `BundleCache::refresh` logs failures
+/// and keeps the last good keys.
+fn spawn_bundle_refresher(
+    bundles: Arc<BundleCache>,
+    every: Duration,
+    clock: Arc<dyn Clock>,
+    metrics: Arc<Metrics>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(every);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let _ = bundles.refresh(clock.now()).await;
+            metrics.set_spiffe_bundle_age(bundles.age(clock.now()).as_secs());
+        }
+    })
+}
+
 impl Drop for ServerApp {
     fn drop(&mut self) {
         // Tasks not handed to a ServerHandle belong to an app that never served.
@@ -347,7 +404,9 @@ impl ServerApp {
 
         let limits = Limits::new(&config.rate_limit);
         let reload = config.policy.reload;
+        let spiffe = SpiffeAuth::from_config(&config, clock.now()).await?;
         let ctx = Arc::new(AppContext {
+            spiffe,
             storage,
             objects,
             history,
@@ -366,6 +425,14 @@ impl ServerApp {
             rate_limits: limits.clone(),
         });
         let mut tasks = vec![redactions.spawn_refresher(propagation_bound)];
+        if let (Some(spiffe), Some(section)) = (&ctx.spiffe, &ctx.config.auth.spiffe) {
+            tasks.push(spawn_bundle_refresher(
+                spiffe.bundles.clone(),
+                section.bundle_refresh,
+                ctx.clock.clone(),
+                ctx.metrics.clone(),
+            ));
+        }
         tasks.extend(crate::reload::spawn(&ctx.policy, metrics, reload));
         crate::handlers::admin::spawn_background(&ctx);
         tracing::info!(

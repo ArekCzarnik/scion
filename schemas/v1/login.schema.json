@@ -18,11 +18,11 @@
           "type": "boolean"
         },
         "method": {
-          "description": "`github` (device flow) or `service`.",
+          "description": "`github` (device flow), `service` or `spiffe`.",
           "type": "string"
         },
         "principal": {
-          "description": "The principal the server issued the token for (`github:<login>` or `service:<name>`).",
+          "description": "The principal the server issued the token for (`github:<login>`, `service:<name>` or a\nSPIFFE ID).",
           "type": "string"
         }
       },

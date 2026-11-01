@@ -16,5 +16,5 @@ pub use error::ConfigError;
 pub use server::{
     AuthSection, DeriveSection, LandSection, MetadataSection, ObjectsSection, ObservabilitySection,
     PolicySection, RateLimitSection, RedactionSection, ServerConfig, ServerSection,
-    ServicePrincipalConfig, load_server, parse_server,
+    ServicePrincipalConfig, SpiffeSection, load_server, parse_server,
 };

@@ -17,6 +17,37 @@ pub enum Principal {
     },
     /// An agent, CI job or importer authenticated with a configured secret.
     Service(String),
+    /// A workload authenticated with a JWT-SVID; holds the full SPIFFE ID, unchanged.
+    Spiffe(String),
+}
+
+/// Longest SPIFFE ID that implementations must support.
+const MAX_SPIFFE_ID_BYTES: usize = 2048;
+/// Longest SPIFFE trust domain name.
+const MAX_TRUST_DOMAIN_BYTES: usize = 255;
+
+/// Whether `s` is a SPIFFE ID with a non-empty path (a workload rather than a trust domain).
+fn valid_spiffe_id(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("spiffe://") else {
+        return false;
+    };
+    let Some((domain, path)) = rest.split_once('/') else {
+        return false;
+    };
+    s.len() <= MAX_SPIFFE_ID_BYTES
+        && !domain.is_empty()
+        && domain.len() <= MAX_TRUST_DOMAIN_BYTES
+        && domain
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+        && path.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg != "."
+                && seg != ".."
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
 }
 
 fn valid_name(s: &str) -> bool {
@@ -27,7 +58,8 @@ fn valid_name(s: &str) -> bool {
 }
 
 impl Principal {
-    /// Parse `github:<login>` or `service:<name>` (INVALID_ARGUMENT otherwise).
+    /// Parse `github:<login>`, `service:<name>` or a `spiffe://` ID (INVALID_ARGUMENT
+    /// otherwise).
     pub fn parse(s: &str) -> Result<Self> {
         let invalid = || {
             ScionError::new(
@@ -48,14 +80,18 @@ impl Principal {
         {
             return Ok(Principal::Service(name.to_owned()));
         }
+        if valid_spiffe_id(s) {
+            return Ok(Principal::Spiffe(s.to_owned()));
+        }
         Err(invalid())
     }
 
-    /// The principal id string: `github:<login>` or `service:<name>`.
+    /// The principal id string: `github:<login>`, `service:<name>` or the SPIFFE ID.
     pub fn id_string(&self) -> String {
         match self {
             Principal::GitHub { login, .. } => format!("github:{login}"),
             Principal::Service(name) => format!("service:{name}"),
+            Principal::Spiffe(id) => id.clone(),
         }
     }
 }
@@ -103,6 +139,56 @@ impl fmt::Display for Tier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spiffe_ids_round_trip_unchanged() {
+        let id = "spiffe://example.org/ns/agents/sa/reviewer";
+        let p = Principal::parse(id).unwrap();
+        assert_eq!(p, Principal::Spiffe(id.into()));
+        assert_eq!(p.id_string(), id);
+        assert_eq!(Principal::parse(&p.id_string()).unwrap(), p);
+    }
+
+    #[test]
+    fn spiffe_ids_keep_their_exact_case() {
+        let upper = Principal::parse("spiffe://example.org/ns/Agents").unwrap();
+        let lower = Principal::parse("spiffe://example.org/ns/agents").unwrap();
+        assert_ne!(upper, lower);
+    }
+
+    #[test]
+    fn spiffe_id_length_limit_is_2048_bytes() {
+        let prefix = "spiffe://example.org/";
+        let at_limit = format!("{prefix}{}", "a".repeat(2048 - prefix.len()));
+        assert!(Principal::parse(&at_limit).is_ok());
+        let over = format!("{at_limit}a");
+        assert!(Principal::parse(&over).is_err());
+    }
+
+    #[test]
+    fn invalid_spiffe_ids_are_rejected() {
+        for bad in [
+            "spiffe://",
+            "spiffe://example.org",
+            "spiffe://example.org/",
+            "spiffe://Example.org/a",
+            "spiffe://exa mple.org/a",
+            "spiffe://example.org:443/a",
+            "spiffe://user@example.org/a",
+            "spiffe:///a",
+            "spiffe://example.org//a",
+            "spiffe://example.org/a/",
+            "spiffe://example.org/./a",
+            "spiffe://example.org/a/../b",
+            "spiffe://example.org/a?b=c",
+            "spiffe://example.org/a#b",
+            "spiffe://example.org/a%20b",
+            "spiffe://example.org/*",
+            "SPIFFE://example.org/a",
+        ] {
+            assert!(Principal::parse(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn parse_and_display() {

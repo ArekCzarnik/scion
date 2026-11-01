@@ -34,7 +34,12 @@ pub fn endpoint_text(ep: &Endpoint) -> String {
 impl Harness {
     /// One server (TLS), optionally a daemon.
     pub async fn start(daemon: bool) -> Self {
-        let cluster = TestCluster::start(ClusterOpts::default().with_daemon(daemon)).await;
+        Self::start_with(ClusterOpts::default().with_daemon(daemon)).await
+    }
+
+    /// A cluster with these options.
+    pub async fn start_with(opts: ClusterOpts) -> Self {
+        let cluster = TestCluster::start(opts).await;
         let home = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         let ca_file = home.path().join("ca.pem");

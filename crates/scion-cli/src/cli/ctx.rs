@@ -6,6 +6,7 @@ use super::error::{CliResult, local};
 use crate::output::envelope;
 use scion_config::{ClientConfig, Env, WcConfig, parse_client, parse_wc, resolve_endpoint};
 use scion_core::{ErrorCode, Result as ScionResult};
+use scion_proto::workload::{ENV_SOCKET, IDENTITY_WAIT, fetch_jwt_svid};
 use scion_proto::{Endpoint, ScionClient, TlsOptions, error_from_status, v1};
 use scion_wc::credentials::{self, Credentials};
 use serde::Serialize;
@@ -307,15 +308,39 @@ impl<'a> Ctx<'a> {
     }
 
     /// Whether an UNAUTHENTICATED failure may be retried after a silent re-exchange of the
-    /// stored GitHub token (SPEC 12.2).
+    /// stored GitHub token (SPEC 12.2) or a fresh JWT-SVID (SPEC 12.3a). `SCION_TOKEN` is never
+    /// replaced.
     pub(crate) fn can_reexchange(&self) -> bool {
-        !self.reexchanged && matches!(&self.token, TokenSource::File(c) if c.github_token.is_some())
+        if self.reexchanged || matches!(self.token, TokenSource::Env(_)) {
+            return false;
+        }
+        self.var(ENV_SOCKET).is_some()
+            || matches!(&self.token, TokenSource::File(c) if c.github_token.is_some())
     }
 
-    /// Exchange the stored GitHub token for a fresh Scion token, store it (0600) and drop the
-    /// cached client (SPEC 12.2: "re-exchange silently on expiry").
+    /// Log in again with a JWT-SVID, store the token (0600) and drop the cached client.
+    async fn reexchange_spiffe(&mut self, socket: &str, root: Option<&Path>) -> CliResult<()> {
+        let (anon, _) = self.connect_with(root, None).await?;
+        let resp = spiffe_login(&anon, socket).await?;
+        let fresh = Credentials {
+            token: resp.token,
+            github_token: None,
+        };
+        credentials::write(&self.credentials_path()?, &fresh)?;
+        tracing::info!(principal = %resp.principal, "logged in again with a JWT-SVID");
+        self.token = TokenSource::File(fresh);
+        self.client = None;
+        Ok(())
+    }
+
+    /// Exchange the stored GitHub token, or with a Workload API a fresh JWT-SVID, for a new Scion
+    /// token, store it (0600) and drop the cached client (SPEC 12.2: "re-exchange silently on
+    /// expiry").
     pub(crate) async fn reexchange(&mut self, root: Option<&Path>) -> CliResult<()> {
         self.reexchanged = true;
+        if let Some(socket) = self.var(ENV_SOCKET) {
+            return self.reexchange_spiffe(&socket, root).await;
+        }
         let TokenSource::File(creds) = self.token.clone() else {
             return Err(local("no stored GitHub token to re-exchange"));
         };
@@ -334,6 +359,31 @@ impl<'a> Ctx<'a> {
         self.client = None;
         Ok(())
     }
+}
+
+/// `Login{jwt_svid}` with an SVID fetched for the audience the server advertises (SPEC 12.3a).
+pub(crate) async fn spiffe_login(
+    client: &ScionClient,
+    socket: &str,
+) -> CliResult<v1::LoginResponse> {
+    let info = client
+        .objects()
+        .get_server_info(v1::GetServerInfoRequest {})
+        .await
+        .map_err(|s| error_from_status(&s))?
+        .into_inner();
+    if info.spiffe_audience.is_empty() {
+        return Err(local("the server does not accept JWT-SVID login"));
+    }
+    let svid = fetch_jwt_svid(socket, &info.spiffe_audience, IDENTITY_WAIT).await?;
+    let response = client
+        .auth()
+        .login(v1::LoginRequest {
+            credential: Some(v1::login_request::Credential::JwtSvid(svid)),
+        })
+        .await
+        .map_err(|s| error_from_status(&s))?;
+    Ok(response.into_inner())
 }
 
 /// `Login{github_access_token}` (SPEC 12.2 step 2).

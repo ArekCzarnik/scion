@@ -258,6 +258,8 @@ message ServerInfo {
   // 7 and 8 are needed by the SPEC 12.2 device flow.
   string github_client_id = 7;
   string github_oauth_base_url = 8;
+  // The audience a JWT-SVID must carry; empty when JWT-SVID login is off.
+  string spiffe_audience = 9;
 }
 
 message GetObjectsRequest {
@@ -587,6 +589,7 @@ message LoginRequest {
   oneof credential {
     string github_access_token = 1;
     ServiceCredential service = 2;
+    string jwt_svid = 3;
   }
 }
 

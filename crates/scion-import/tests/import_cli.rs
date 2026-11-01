@@ -26,6 +26,7 @@ async fn run(args: Vec<String>, envs: Vec<(&'static str, String)>) -> Output {
         .env_remove("SCION_TOKEN")
         .env_remove("SCION_SERVICE_NAME")
         .env_remove("SCION_SERVICE_SECRET")
+        .env_remove("SPIFFE_ENDPOINT_SOCKET")
         .env_remove("SCION_ENDPOINT")
         .env_remove("SCION_CA_FILE");
     for (k, v) in envs {
@@ -172,4 +173,66 @@ async fn cli_token_over_unix_socket() {
     )
     .await;
     assert!(!out.status.success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_logs_in_with_a_jwt_svid() {
+    const AUDIENCE: &str = "scion://monorepo";
+    const SUB: &str = "spiffe://example.org/ns/ci/sa/importer";
+    let issuer = scion_testkit::SvidIssuer::new();
+    let bundle = scion_testkit::FakeSpiffe::start(issuer.bundle_json()).await;
+    let section = scion_config::SpiffeSection {
+        trust_domain: "example.org".into(),
+        audience: AUDIENCE.into(),
+        token_ttl: std::time::Duration::from_secs(900),
+        bundle_url: Some(bundle.bundle_url()),
+        bundle_file: None,
+        bundle_refresh: std::time::Duration::from_secs(3600),
+    };
+    let s = scion_server::testing::InProcessServer::start(scion_server::testing::ServerTestOpts {
+        acl_toml: scion_import::testing::importer_acl().replace("service:importer", SUB),
+        tweak: Some(std::sync::Arc::new(move |c| {
+            c.auth.spiffe = Some(section.clone());
+        })),
+        ..Default::default()
+    })
+    .await;
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 300;
+    let workload = scion_testkit::FakeWorkloadApi::start(issuer.svid(SUB, AUDIENCE, exp)).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = unpack("synthetic-edge", tmp.path());
+    let ca = tmp.path().join("ca.pem");
+    std::fs::write(&ca, s.tls.as_ref().unwrap().ca_pem.as_ref().unwrap()).unwrap();
+    let ca_s = ca.display().to_string();
+    let ep = endpoint_text(&s.endpoint);
+    let extra = ["--ca-file", &ca_s, "--skip-submodules"];
+    let out = run(
+        args(&repo, "main", "imp/spiffe", &ep, &extra),
+        vec![("SPIFFE_ENDPOINT_SOCKET", workload.socket())],
+    )
+    .await;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(workload.audiences(), vec![AUDIENCE]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_names_every_credential_when_none_is_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run(
+        args(tmp.path(), "main", "x", "https://127.0.0.1:1", &[]),
+        vec![],
+    )
+    .await;
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("SPIFFE_ENDPOINT_SOCKET"), "{err}");
 }

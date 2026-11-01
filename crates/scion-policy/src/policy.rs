@@ -46,6 +46,8 @@ enum Member {
     GitHubId(u64),
     /// `service:<name>`.
     Service(String),
+    /// A full SPIFFE ID, compared byte for byte.
+    Spiffe(String),
     /// `group:<name>` (only in written lists; never in resolved sets).
     Group(String),
     /// Everyone (only produced by [`Policy::allow_all_for_tests`]).
@@ -58,6 +60,7 @@ impl Member {
             Member::GitHubLogin(l) => format!("github:{l}"),
             Member::GitHubId(n) => format!("github-id:{n}"),
             Member::Service(s) => format!("service:{s}"),
+            Member::Spiffe(id) => id.clone(),
             Member::Group(g) => format!("group:{g}"),
             Member::Anyone => "*".to_owned(),
         }
@@ -101,6 +104,7 @@ fn principal_atoms(p: &Principal) -> Vec<Member> {
             v
         }
         Principal::Service(name) => vec![Member::Service(name.clone())],
+        Principal::Spiffe(id) => vec![Member::Spiffe(id.clone())],
     }
 }
 
@@ -214,6 +218,10 @@ fn parse_member(s: &str) -> Result<Member, PolicyError> {
     } else if let Some(name) = s.strip_prefix("service:") {
         if valid_ident(name) {
             return Ok(Member::Service(name.to_owned()));
+        }
+    } else if s.starts_with("spiffe://") {
+        if matches!(Principal::parse(s), Ok(Principal::Spiffe(_))) {
+            return Ok(Member::Spiffe(s.to_owned()));
         }
     } else if let Some(g) = s.strip_prefix("group:")
         && valid_ident(g)
