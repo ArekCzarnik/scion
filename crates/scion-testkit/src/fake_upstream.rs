@@ -567,6 +567,7 @@ impl v1::object_service_server::ObjectService for Svc {
             limits: Some(v1::LimitsMsg::from(&scion_core::Limits::default())),
             github_client_id: String::new(),
             github_oauth_base_url: String::new(),
+            spiffe_audience: String::new(),
         }))
     }
 

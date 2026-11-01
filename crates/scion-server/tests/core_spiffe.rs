@@ -169,3 +169,45 @@ async fn the_token_uses_the_spiffe_lifetime() {
         "the service TTL must stay unchanged"
     );
 }
+
+async fn server_info(srv: &InProcessServer) -> v1::ServerInfo {
+    let request = v1::GetServerInfoRequest {};
+    srv.client(None)
+        .await
+        .objects()
+        .get_server_info(request)
+        .await
+        .unwrap()
+        .into_inner()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_audience_is_advertised() {
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    assert_eq!(
+        server_info(&start(&fake).await).await.spiffe_audience,
+        AUDIENCE
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_the_section_svids_are_rejected_and_no_audience_is_advertised() {
+    let issuer = SvidIssuer::new();
+    let srv = InProcessServer::start(ServerTestOpts {
+        acl_toml: acl(),
+        ..ServerTestOpts::default()
+    })
+    .await;
+    assert_eq!(server_info(&srv).await.spiffe_audience, "");
+    let status = login(&srv, &svid(&issuer, REVIEWER)).await.unwrap_err();
+    expect_err(&status, ErrorCode::Unauthenticated, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_svid_is_a_missing_field() {
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    let status = login(&start(&fake).await, "").await.unwrap_err();
+    expect_err(&status, ErrorCode::InvalidArgument, None);
+}
