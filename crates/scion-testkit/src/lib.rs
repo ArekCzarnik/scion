@@ -19,7 +19,7 @@ pub use corpus::{CorpusSpec, GenCommit, GenRepo, generate};
 pub use edge::edge_cases;
 pub use encode::encode_tree;
 pub use fake_github::FakeGitHub;
-pub use fake_spiffe::SvidIssuer;
+pub use fake_spiffe::{FakeSpiffe, SvidIssuer};
 pub use fake_upstream::{
     FakeUpstream, FakeUpstreamOpts, RecordedRequest, methods as upstream_methods,
 };

@@ -3,12 +3,20 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test infrastructure
 
+use axum::Router;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use parking_lot::Mutex;
 use ring::rand::SystemRandom;
 use ring::rsa::PublicKeyComponents;
 use ring::signature::{self, EcdsaKeyPair, KeyPair, RsaKeyPair};
 use serde_json::{Value, json};
+use std::sync::Arc;
+use tokio::task::AbortHandle;
 
 /// Key id of the P-256 key.
 const KID_P256: &str = "fake-p256";
@@ -78,6 +86,16 @@ impl SvidIssuer {
         serde_json::to_vec(&keys).unwrap()
     }
 
+    /// One bundle holding the keys of every issuer, as during a key rotation.
+    pub fn merged_bundle(issuers: &[&SvidIssuer]) -> Vec<u8> {
+        let mut keys = Vec::new();
+        for issuer in issuers {
+            let bundle: Value = serde_json::from_slice(&issuer.bundle_json()).unwrap();
+            keys.extend(bundle["keys"].as_array().unwrap().iter().cloned());
+        }
+        serde_json::to_vec(&json!({"keys": keys})).unwrap()
+    }
+
     /// A JWT-SVID signed with ES256, carrying `sub`, `aud` and `exp`.
     pub fn svid(&self, sub: &str, aud: &str, exp_unix: i64) -> String {
         self.sign(
@@ -125,5 +143,85 @@ impl SvidIssuer {
             .sign(rsa_padding, &self.rng, input, &mut sig)
             .unwrap();
         sig
+    }
+}
+
+#[derive(Default)]
+struct BundleState {
+    body: Vec<u8>,
+    down: bool,
+    stalled: bool,
+}
+
+/// A SPIFFE bundle endpoint on `127.0.0.1:0`, with switches for outages.
+pub struct FakeSpiffe {
+    url: String,
+    state: Arc<Mutex<BundleState>>,
+    server: AbortHandle,
+}
+
+async fn serve_bundle(State(state): State<Arc<Mutex<BundleState>>>) -> Response {
+    let (body, down, stalled) = {
+        let s = state.lock();
+        (s.body.clone(), s.down, s.stalled)
+    };
+    if stalled {
+        std::future::pending::<()>().await;
+    }
+    if down {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    body.into_response()
+}
+
+impl FakeSpiffe {
+    /// Start serving `bundle`.
+    pub async fn start(bundle: Vec<u8>) -> Self {
+        let state = Arc::new(Mutex::new(BundleState {
+            body: bundle,
+            ..BundleState::default()
+        }));
+        let app = Router::new()
+            .route("/keys", get(serve_bundle))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        })
+        .abort_handle();
+        FakeSpiffe {
+            url: format!("http://{addr}/keys"),
+            state,
+            server,
+        }
+    }
+
+    /// The bundle URL.
+    pub fn bundle_url(&self) -> String {
+        self.url.clone()
+    }
+
+    /// Replace the served bundle.
+    pub fn set_bundle(&self, bundle: Vec<u8>) {
+        self.state.lock().body = bundle;
+    }
+
+    /// While on, requests fail with 503.
+    pub fn set_down(&self, down: bool) {
+        self.state.lock().down = down;
+    }
+
+    /// While on, requests never answer.
+    pub fn set_stalled(&self, stalled: bool) {
+        self.state.lock().stalled = stalled;
+    }
+}
+
+impl Drop for FakeSpiffe {
+    fn drop(&mut self) {
+        self.server.abort();
     }
 }
