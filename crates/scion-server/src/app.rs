@@ -260,6 +260,25 @@ impl SpiffeAuth {
     }
 }
 
+/// Reload the bundle every `every` and publish its age. `BundleCache::refresh` logs failures
+/// and keeps the last good keys.
+fn spawn_bundle_refresher(
+    bundles: Arc<BundleCache>,
+    every: Duration,
+    clock: Arc<dyn Clock>,
+    metrics: Arc<Metrics>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(every);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let _ = bundles.refresh(clock.now()).await;
+            metrics.set_spiffe_bundle_age(bundles.age(clock.now()).as_secs());
+        }
+    })
+}
+
 impl Drop for ServerApp {
     fn drop(&mut self) {
         // Tasks not handed to a ServerHandle belong to an app that never served.
@@ -406,6 +425,14 @@ impl ServerApp {
             rate_limits: limits.clone(),
         });
         let mut tasks = vec![redactions.spawn_refresher(propagation_bound)];
+        if let (Some(spiffe), Some(section)) = (&ctx.spiffe, &ctx.config.auth.spiffe) {
+            tasks.push(spawn_bundle_refresher(
+                spiffe.bundles.clone(),
+                section.bundle_refresh,
+                ctx.clock.clone(),
+                ctx.metrics.clone(),
+            ));
+        }
         tasks.extend(crate::reload::spawn(&ctx.policy, metrics, reload));
         crate::handlers::admin::spawn_background(&ctx);
         tracing::info!(

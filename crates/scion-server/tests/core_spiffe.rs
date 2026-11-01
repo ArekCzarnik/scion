@@ -327,3 +327,65 @@ async fn history_names_the_agent() {
         .entries;
     assert_eq!(entries.last().unwrap().principal, REVIEWER);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rotated_keys_are_picked_up_without_a_restart() {
+    let old = SvidIssuer::new();
+    let new = SvidIssuer::new();
+    let fake = Arc::new(FakeSpiffe::start(old.bundle_json()).await);
+    let mut quick = section(&fake);
+    quick.bundle_refresh = Duration::from_millis(20);
+    let srv = InProcessServer::start(opts_with(quick, |_| {})).await;
+    assert!(login(&srv, &svid(&new, REVIEWER)).await.is_err());
+    fake.set_bundle(new.bundle_json());
+    let bundles = srv.ctx().spiffe.as_ref().unwrap().bundles.clone();
+    let token = svid(&new, REVIEWER);
+    let validator = SvidValidatorProbe::new();
+    eventually("the new keys are loaded", || {
+        validator.accepts(&token, &bundles)
+    })
+    .await;
+    login(&srv, &token).await.unwrap();
+}
+
+struct SvidValidatorProbe(scion_auth::SvidValidator);
+
+impl SvidValidatorProbe {
+    fn new() -> Self {
+        Self(scion_auth::SvidValidator::new("example.org", AUDIENCE))
+    }
+
+    fn accepts(&self, token: &str, bundles: &scion_auth::BundleCache) -> bool {
+        self.0
+            .validate(token, &bundles.current(), SystemTime::now())
+            .is_ok()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bundle_outage_keeps_the_server_working() {
+    let issuer = SvidIssuer::new();
+    let fake = FakeSpiffe::start(issuer.bundle_json()).await;
+    let clock = ManualClock::new(SystemTime::now());
+    let mut quick = section(&fake);
+    quick.bundle_refresh = Duration::from_millis(20);
+    let srv = InProcessServer::start(ServerTestOpts {
+        clock: Some(clock.clone()),
+        ..opts_with(quick, |_| {})
+    })
+    .await;
+    let holder = agent(&srv, &issuer, REVIEWER).await;
+
+    fake.set_down(true);
+    clock.advance(Duration::from_secs(120));
+    let metrics = srv.ctx().metrics.clone();
+    eventually("the age metric grows", || {
+        metrics.spiffe_bundle_age() >= 120
+    })
+    .await;
+
+    holder.auth().who_am_i(v1::WhoAmIRequest {}).await.unwrap();
+    login(&srv, &svid(&issuer, RUNNER)).await.unwrap();
+    assert_eq!(http_get(srv.admin_addr().unwrap(), "/readyz").await.0, 200);
+    assert!(clock.now() > UNIX_EPOCH);
+}

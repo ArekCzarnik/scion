@@ -58,6 +58,8 @@ pub struct Metrics {
     pub upstream_requests: IntCounterVec,
     /// (+) `scion_integrity_failures_total{tier}`: the SPEC 16.1 class 7 alert.
     pub integrity_failures: IntCounterVec,
+    /// `scion_spiffe_bundle_age_seconds`.
+    pub spiffe_bundle_age_seconds: IntGaugeVec,
 }
 
 /// Unwrap a metric constructor or registration result.
@@ -123,6 +125,7 @@ impl Metrics {
         "scion_object_bytes_served_total",
         "scion_upstream_requests_total",
         "scion_integrity_failures_total",
+        "scion_spiffe_bundle_age_seconds",
     ];
 
     /// Create and register every metric (SPEC 15.2, PLAN 6.10) in a fresh registry.
@@ -196,6 +199,15 @@ impl Metrics {
                 &["tier"],
             )),
         );
+        let spiffe_bundle_age_seconds = int_gauge_vec(
+            &r,
+            "scion_spiffe_bundle_age_seconds",
+            "Seconds since the SPIFFE bundle was last fetched successfully.",
+            &[],
+        );
+        spiffe_bundle_age_seconds
+            .with_label_values::<&str>(&[])
+            .set(0);
         let policy_epoch_info = int_gauge_vec(
             &r,
             "scion_policy_epoch_info",
@@ -236,6 +248,7 @@ impl Metrics {
             object_bytes_served,
             upstream_requests,
             integrity_failures,
+            spiffe_bundle_age_seconds,
         })
     }
 
@@ -260,6 +273,20 @@ impl Metrics {
             object = %object,
             "stored copy failed digest verification"
         );
+    }
+
+    /// The current `scion_spiffe_bundle_age_seconds`.
+    pub fn spiffe_bundle_age(&self) -> i64 {
+        self.spiffe_bundle_age_seconds
+            .with_label_values::<&str>(&[])
+            .get()
+    }
+
+    /// Set `scion_spiffe_bundle_age_seconds`.
+    pub fn set_spiffe_bundle_age(&self, seconds: u64) {
+        self.spiffe_bundle_age_seconds
+            .with_label_values::<&str>(&[])
+            .set(i64::try_from(seconds).unwrap_or(i64::MAX));
     }
 
     /// Set `scion_policy_epoch_info{epoch}` to 1 for `epoch` and drop the previous epoch's
