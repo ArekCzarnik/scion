@@ -10,7 +10,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ring::signature::{self, UnparsedPublicKey};
 use scion_core::{ErrorCode, Principal, Result, ScionError};
 use serde::Deserialize;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Tolerated clock skew when checking `exp`.
+const EXP_LEEWAY_SECS: f64 = 30.0;
 
 fn rejected(reason: &'static str) -> ScionError {
     tracing::info!(reason, "JWT-SVID rejected");
@@ -126,6 +129,7 @@ struct Header {
 #[derive(Deserialize)]
 struct Payload {
     sub: String,
+    exp: f64,
 }
 
 fn verify(alg: &str, key: &PublicKey, input: &[u8], sig: &[u8]) -> bool {
@@ -183,12 +187,7 @@ impl SvidValidator {
     }
 
     /// Validate `token` against `bundle` at time `now`; the principal is its SPIFFE ID.
-    pub fn validate(
-        &self,
-        token: &str,
-        bundle: &SvidBundle,
-        _now: SystemTime,
-    ) -> Result<Principal> {
+    pub fn validate(&self, token: &str, bundle: &SvidBundle, now: SystemTime) -> Result<Principal> {
         let parts: Vec<&str> = token.split('.').collect();
         let [header_part, payload_part, sig_part] = parts[..] else {
             return Err(rejected("not JWS Compact Serialization"));
@@ -209,6 +208,13 @@ impl SvidValidator {
             return Err(rejected("signature does not verify"));
         }
         let payload: Payload = decode_json(payload_part, "malformed payload")?;
+        let now_secs = now
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| rejected("clock before the epoch"))?
+            .as_secs_f64();
+        if now_secs >= payload.exp + EXP_LEEWAY_SECS {
+            return Err(rejected("expired"));
+        }
         Principal::parse(&payload.sub).map_err(|_| rejected("subject is not a SPIFFE ID"))
     }
 }
