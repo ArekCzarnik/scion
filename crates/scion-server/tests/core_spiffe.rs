@@ -423,6 +423,8 @@ async fn svids_never_reach_the_logs() {
     login(&srv, &bad).await.unwrap_err();
     let needles = [good.as_bytes(), bad.as_bytes(), token.as_bytes()];
     assert!(capture.find_needles(&needles).is_empty());
+    // The capture must have seen the rejection, or the check above proves nothing.
+    assert!(capture.raw().contains("JWT-SVID rejected"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
