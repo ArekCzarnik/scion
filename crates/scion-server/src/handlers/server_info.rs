@@ -31,5 +31,10 @@ pub async fn get_server_info(
         limits: Some(v1::LimitsMsg::from(&ctx.config.limits)),
         github_client_id: auth.github_client_id.clone(),
         github_oauth_base_url: auth.github_oauth_base_url.clone(),
+        spiffe_audience: auth
+            .spiffe
+            .as_ref()
+            .map(|s| s.audience.clone())
+            .unwrap_or_default(),
     }))
 }
