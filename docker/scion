@@ -1,0 +1,30 @@
+#!/bin/sh
+# Runs the separate scion CLI image against the compose stack, with the current directory
+# mounted. Commands run as service:agent, except `import` and `redact`, which run as service:admin.
+# Paths must stay below the current directory:
+#   docker/scion import --git . --ref HEAD --target-ref main
+#   docker/scion checkout main work
+#   docker/scion -C work status
+set -eu
+
+admin=
+case "${1:-}" in
+  import | redact)
+    admin="--volume scion-admin:/var/lib/scion/admin:ro --env SCION_SERVICE_NAME=admin
+      --env SCION_SERVICE_SECRET_FILE=/var/lib/scion/admin/admin.secret"
+    ;;
+esac
+
+interactive=-i
+if [ -t 0 ] && [ -t 1 ]; then
+  interactive=-it
+fi
+
+exec docker run --rm "$interactive" \
+  --network scion \
+  --user "$(id -u):$(id -g)" \
+  --volume scion-client:/var/lib/scion/client:ro \
+  --volume "$PWD:$PWD" --workdir "$PWD" \
+  --env SCION_AUTHOR \
+  $admin \
+  "${SCION_CLI_IMAGE:-scion-cli:local}" "$@"
