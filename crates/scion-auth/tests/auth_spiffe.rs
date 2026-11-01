@@ -248,3 +248,32 @@ fn kid_selects_the_key_and_is_optional() {
     let wrong = issuer.sign(&json!({"alg": "ES256", "kid": "fake-rsa"}), &claims());
     assert_rejected(validate(&issuer, &wrong));
 }
+
+#[test]
+fn malformed_token_shapes_are_rejected() {
+    let issuer = SvidIssuer::new();
+    let token = issuer.svid(SUB, AUDIENCE, exp_in(300));
+    let json_serialization = json!({"payload": "e30", "signatures": []}).to_string();
+    for bad in [
+        "",
+        ".",
+        "..",
+        "a.b",
+        "a.b.c.d",
+        "not base64.at.all",
+        &json_serialization,
+        &format!("{token}.extra"),
+        &format!(" {token}"),
+    ] {
+        assert_rejected(validate(&issuer, bad));
+    }
+}
+
+#[test]
+fn oversized_tokens_are_rejected_before_parsing() {
+    let issuer = SvidIssuer::new();
+    let padded =
+        json!({"sub": SUB, "aud": [AUDIENCE], "exp": exp_in(300), "x": "a".repeat(20_000)});
+    let token = issuer.sign(&json!({"alg": "ES256"}), &padded);
+    assert_rejected(validate(&issuer, &token));
+}

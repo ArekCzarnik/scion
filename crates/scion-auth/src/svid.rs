@@ -12,6 +12,10 @@ use scion_core::{ErrorCode, Principal, Result, ScionError};
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Longest token considered. A 2048-byte SPIFFE ID is about 2.7 KiB in base64; this also leaves
+/// room for an RSA-8192 signature and for claims Scion ignores.
+const MAX_TOKEN_BYTES: usize = 8 * 1024;
+
 /// Tolerated clock skew when checking `exp`.
 const EXP_LEEWAY_SECS: f64 = 30.0;
 
@@ -210,6 +214,9 @@ impl SvidValidator {
 
     /// Validate `token` against `bundle` at time `now`; the principal is its SPIFFE ID.
     pub fn validate(&self, token: &str, bundle: &SvidBundle, now: SystemTime) -> Result<Principal> {
+        if token.len() > MAX_TOKEN_BYTES {
+            return Err(rejected("token too long"));
+        }
         let parts: Vec<&str> = token.split('.').collect();
         let [header_part, payload_part, sig_part] = parts[..] else {
             return Err(rejected("not JWS Compact Serialization"));
