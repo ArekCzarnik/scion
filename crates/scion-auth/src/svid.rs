@@ -21,6 +21,12 @@ fn bundle_error(m: &str) -> ScionError {
     ScionError::new(ErrorCode::InvalidArgument, format!("SPIFFE bundle: {m}"))
 }
 
+/// The `alg` values accepted, checked before anything else in the token is used. The JWT-SVID
+/// standard also lists ES512, which `ring` cannot verify and SPIRE never issues.
+const ALGORITHMS: [&str; 8] = [
+    "ES256", "ES384", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
+];
+
 /// A public key usable for one family of algorithms.
 enum PublicKey {
     P256(Vec<u8>),
@@ -188,6 +194,9 @@ impl SvidValidator {
             return Err(rejected("not JWS Compact Serialization"));
         };
         let header: Header = decode_json(header_part, "malformed header")?;
+        if !ALGORITHMS.contains(&header.alg.as_str()) {
+            return Err(rejected("algorithm not allowed"));
+        }
         let sig = URL_SAFE_NO_PAD
             .decode(sig_part)
             .map_err(|_| rejected("malformed signature"))?;
