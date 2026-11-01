@@ -9,11 +9,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let proto_root = manifest.join("../../proto");
     let proto_file = proto_root.join("scion/v1/scion.proto");
+    let workload_file = proto_root.join("spiffe/workload.proto");
     println!("cargo:rerun-if-changed={}", proto_file.display());
+    println!("cargo:rerun-if-changed={}", workload_file.display());
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
         .file_descriptor_set_path(out.join("scion_descriptor.bin"))
-        .compile_protos(&[proto_file], &[proto_root])?;
+        .compile_protos(&[proto_file], std::slice::from_ref(&proto_root))?;
+    tonic_prost_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .compile_protos(&[workload_file], &[proto_root])?;
     Ok(())
 }

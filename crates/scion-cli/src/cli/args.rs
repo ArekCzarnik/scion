@@ -129,6 +129,10 @@ pub(crate) struct LoginArgs {
     /// first line of standard input.
     #[arg(long, value_name = "NAME")]
     pub service: Option<String>,
+    /// Log in as this workload with a JWT-SVID from the SPIFFE Workload API at
+    /// SPIFFE_ENDPOINT_SOCKET.
+    #[arg(long, conflicts_with = "service")]
+    pub spiffe: bool,
     /// Do not store the GitHub token for silent re-exchange.
     #[arg(long)]
     pub no_store_github_token: bool,

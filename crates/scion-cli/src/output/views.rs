@@ -13,11 +13,12 @@ pub use scion_wc::{FileChangeView, GotoReport, LandReport};
 #[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct LoginData {
-    /// The principal the server issued the token for (`github:<login>` or `service:<name>`).
+    /// The principal the server issued the token for (`github:<login>`, `service:<name>` or a
+    /// SPIFFE ID).
     pub principal: String,
     /// Token expiry, Unix seconds.
     pub expires_at_unix: i64,
-    /// `github` (device flow) or `service`.
+    /// `github` (device flow), `service` or `spiffe`.
     pub method: String,
     /// Where the credentials were written (mode 0600).
     pub credentials_path: String,

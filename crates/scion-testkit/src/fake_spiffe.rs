@@ -14,6 +14,8 @@ use parking_lot::Mutex;
 use ring::rand::SystemRandom;
 use ring::rsa::PublicKeyComponents;
 use ring::signature::{self, EcdsaKeyPair, KeyPair, RsaKeyPair};
+use scion_proto::spiffe::spiffe_workload_api_server::{SpiffeWorkloadApi, SpiffeWorkloadApiServer};
+use scion_proto::spiffe::{Jwtsvid, JwtsvidRequest, JwtsvidResponse};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::task::AbortHandle;
@@ -221,6 +223,113 @@ impl FakeSpiffe {
 }
 
 impl Drop for FakeSpiffe {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+#[derive(Default)]
+struct WorkloadState {
+    svid: String,
+    deny_next: u32,
+    calls: u32,
+    audiences: Vec<String>,
+}
+
+struct WorkloadService {
+    state: Arc<Mutex<WorkloadState>>,
+}
+
+#[tonic::async_trait]
+impl SpiffeWorkloadApi for WorkloadService {
+    async fn fetch_jwtsvid(
+        &self,
+        request: tonic::Request<JwtsvidRequest>,
+    ) -> Result<tonic::Response<JwtsvidResponse>, tonic::Status> {
+        if request.metadata().get("workload.spiffe.io").is_none() {
+            return Err(tonic::Status::invalid_argument("missing security header"));
+        }
+        let mut state = self.state.lock();
+        state.calls += 1;
+        if state.deny_next > 0 {
+            state.deny_next -= 1;
+            return Err(tonic::Status::permission_denied("no identity issued"));
+        }
+        state.audiences.extend(request.into_inner().audience);
+        Ok(tonic::Response::new(JwtsvidResponse {
+            svids: vec![Jwtsvid {
+                spiffe_id: String::new(),
+                svid: state.svid.clone(),
+                hint: String::new(),
+            }],
+        }))
+    }
+}
+
+/// A SPIFFE Workload API on a Unix socket, handing out a fixed JWT-SVID.
+pub struct FakeWorkloadApi {
+    socket: String,
+    state: Arc<Mutex<WorkloadState>>,
+    server: AbortHandle,
+    _dir: tempfile::TempDir,
+}
+
+impl FakeWorkloadApi {
+    /// Start serving `svid`.
+    pub async fn start(svid: String) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workload.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let state = Arc::new(Mutex::new(WorkloadState {
+            svid,
+            ..WorkloadState::default()
+        }));
+        let service = WorkloadService {
+            state: state.clone(),
+        };
+        let server = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+            let _ = tonic::transport::Server::builder()
+                .add_service(SpiffeWorkloadApiServer::new(service))
+                .serve_with_incoming(incoming)
+                .await;
+        })
+        .abort_handle();
+        FakeWorkloadApi {
+            socket: format!("unix://{}", path.display()),
+            state,
+            server,
+            _dir: dir,
+        }
+    }
+
+    /// The value for `SPIFFE_ENDPOINT_SOCKET`.
+    pub fn socket(&self) -> String {
+        self.socket.clone()
+    }
+
+    /// Answer the next `n` requests with `PermissionDenied`, as before an identity exists.
+    pub fn deny_next(&self, n: u32) {
+        self.state.lock().deny_next = n;
+    }
+
+    /// Hand out `svid` from now on.
+    pub fn set_svid(&self, svid: String) {
+        self.state.lock().svid = svid;
+    }
+
+    /// Every audience requested so far.
+    pub fn audiences(&self) -> Vec<String> {
+        self.state.lock().audiences.clone()
+    }
+
+    /// Number of requests so far.
+    pub fn calls(&self) -> u32 {
+        self.state.lock().calls
+    }
+}
+
+impl Drop for FakeWorkloadApi {
     fn drop(&mut self) {
         self.server.abort();
     }

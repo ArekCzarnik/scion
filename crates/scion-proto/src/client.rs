@@ -246,7 +246,7 @@ enum Prepared {
 }
 
 /// A connector dialing the Unix socket at `path` (the URI is ignored).
-fn unix_connector(
+pub(crate) fn unix_connector(
     path: std::path::PathBuf,
 ) -> impl tower_service::Service<
     http::Uri,
