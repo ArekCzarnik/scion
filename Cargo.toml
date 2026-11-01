@@ -109,6 +109,7 @@ thiserror = "=2.0.21"
 anyhow = "=1.0.104"
 hex = "=0.4.3"
 base64 = "=0.22.1"
+ring = "=0.17.14"
 
 # ---- serialization / config ----
 serde = { version = "=1.0.229", features = ["derive"] }
