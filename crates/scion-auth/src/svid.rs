@@ -24,6 +24,8 @@ fn bundle_error(m: &str) -> ScionError {
 /// A public key usable for one family of algorithms.
 enum PublicKey {
     P256(Vec<u8>),
+    P384(Vec<u8>),
+    Rsa { n: Vec<u8>, e: Vec<u8> },
 }
 
 struct BundleKey {
@@ -43,6 +45,8 @@ struct RawKey {
     kty: String,
     kid: Option<String>,
     crv: Option<String>,
+    n: Option<String>,
+    e: Option<String>,
     x: Option<String>,
     y: Option<String>,
 }
@@ -57,16 +61,24 @@ fn decode_field(field: &Option<String>, name: &str) -> Result<Vec<u8>> {
 }
 
 impl RawKey {
+    /// The uncompressed point `ring` expects: 0x04, then x and y.
+    fn ec_point(&self) -> Result<Vec<u8>> {
+        let mut point = vec![4];
+        point.extend(decode_field(&self.x, "x")?);
+        point.extend(decode_field(&self.y, "y")?);
+        Ok(point)
+    }
+
     /// The key, or `None` for a type Scion cannot use: one unknown entry must not invalidate a
     /// bundle whose other keys work.
     fn public_key(&self) -> Result<Option<PublicKey>> {
         match (self.kty.as_str(), self.crv.as_deref()) {
-            ("EC", Some("P-256")) => {
-                let mut point = vec![4];
-                point.extend(decode_field(&self.x, "x")?);
-                point.extend(decode_field(&self.y, "y")?);
-                Ok(Some(PublicKey::P256(point)))
-            }
+            ("EC", Some("P-256")) => Ok(Some(PublicKey::P256(self.ec_point()?))),
+            ("EC", Some("P-384")) => Ok(Some(PublicKey::P384(self.ec_point()?))),
+            ("RSA", _) => Ok(Some(PublicKey::Rsa {
+                n: decode_field(&self.n, "n")?,
+                e: decode_field(&self.e, "e")?,
+            })),
             _ => Ok(None),
         }
     }
@@ -111,12 +123,33 @@ struct Payload {
 }
 
 fn verify(alg: &str, key: &PublicKey, input: &[u8], sig: &[u8]) -> bool {
-    match (alg, key) {
-        ("ES256", PublicKey::P256(point)) => {
-            UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, point)
-                .verify(input, sig)
-                .is_ok()
+    let rsa = match alg {
+        "RS256" => &signature::RSA_PKCS1_2048_8192_SHA256,
+        "RS384" => &signature::RSA_PKCS1_2048_8192_SHA384,
+        "RS512" => &signature::RSA_PKCS1_2048_8192_SHA512,
+        "PS256" => &signature::RSA_PSS_2048_8192_SHA256,
+        "PS384" => &signature::RSA_PSS_2048_8192_SHA384,
+        "PS512" => &signature::RSA_PSS_2048_8192_SHA512,
+        _ => {
+            return match (alg, key) {
+                ("ES256", PublicKey::P256(point)) => {
+                    UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, point)
+                        .verify(input, sig)
+                        .is_ok()
+                }
+                ("ES384", PublicKey::P384(point)) => {
+                    UnparsedPublicKey::new(&signature::ECDSA_P384_SHA384_FIXED, point)
+                        .verify(input, sig)
+                        .is_ok()
+                }
+                _ => false,
+            };
         }
+    };
+    match key {
+        PublicKey::Rsa { n, e } => signature::RsaPublicKeyComponents { n, e }
+            .verify(rsa, input, sig)
+            .is_ok(),
         _ => false,
     }
 }
